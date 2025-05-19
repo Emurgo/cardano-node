@@ -489,7 +489,6 @@ handleSimpleNode blockType runP p2pMode tracers nc onKernel = do
         ledgerPeerSnapshotPathVar <- newTVarIO ntPeerSnapshotPath
         ledgerPeerSnapshotVar <- newTVarIO =<< updateLedgerPeerSnapshot
                                                 (startupTracer tracers)
-                                                (ncTopologyFile nc)
                                                 (readTVar ledgerPeerSnapshotPathVar)
                                                 (const . pure $ ())
 
@@ -530,7 +529,6 @@ handleSimpleNode blockType runP p2pMode tracers nc onKernel = do
                   ledgerPeerSnapshotPathVar
                 void $ updateLedgerPeerSnapshot
                   (startupTracer tracers)
-                  (ncTopologyFile nc)
                   (readTVar ledgerPeerSnapshotPathVar)
                   (writeTVar ledgerPeerSnapshotVar)
                 traceWith (startupTracer tracers) (BlockForgingUpdate NotEffective)
@@ -759,7 +757,6 @@ installP2PSigHUPHandler startupTracer blockType nc nodeKernel localRootsVar publ
                                   useLedgerVar useBootstrapPeersVar ledgerPeerSnapshotPathVar
       void $ updateLedgerPeerSnapshot
                startupTracer
-               (ncTopologyFile nc)
                (readTVar ledgerPeerSnapshotPathVar)
                (writeTVar ledgerPeerSnapshotVar)
     )
@@ -872,14 +869,13 @@ updateTopologyConfiguration startupTracer nc localRootsVar publicRootsVar useLed
 #endif
 
 updateLedgerPeerSnapshot :: Tracer IO (StartupTrace blk)
-                         -> TopologyFile
                          -> STM IO (Maybe PeerSnapshotFile)
                          -> (Maybe LedgerPeerSnapshot -> STM IO ())
                          -> IO (Maybe LedgerPeerSnapshot)
-updateLedgerPeerSnapshot startupTracer topoFile readLedgerPeerPath writeVar = do
+updateLedgerPeerSnapshot startupTracer readLedgerPeerPath writeVar = do
   mPeerSnapshotFile <- atomically readLedgerPeerPath
   mLedgerPeerSnapshot <- forM mPeerSnapshotFile $ \f -> do
-    lps@(LedgerPeerSnapshot (wOrigin, _)) <- readPeerSnapshotFile topoFile f
+    lps@(LedgerPeerSnapshot (wOrigin, _)) <- readPeerSnapshotFile f
     lps <$ traceWith startupTracer (LedgerPeerSnapshotLoaded wOrigin)
   atomically . writeVar $ mLedgerPeerSnapshot
   pure mLedgerPeerSnapshot
