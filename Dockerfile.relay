@@ -6,7 +6,7 @@ RUN mkdir secp256k1-sources && cd secp256k1-sources && git clone https://github.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | BOOTSTRAP_HASKELL_NONINTERACTIVE=1 BOOTSTRAP_HASKELL_GHC_VERSION=9.6.5 BOOTSTRAP_HASKELL_CABAL_VERSION=3.10.3.0 BOOTSTRAP_HASKELL_INSTALL_STACK=1 BOOTSTRAP_HASKELL_INSTALL_HLS=1 BOOTSTRAP_HASKELL_ADJUST_BASHRC=P sh
 
 ENV PATH="/root/.cabal/bin:/root/.ghcup/bin:/root/.local/bin:$PATH"
-RUN apt-get -y install libsodium23 libsodium-dev
+RUN git clone https://github.com/input-output-hk/libsodium && cd libsodium && git checkout dbb48cc && ./autogen.sh && cp /usr/share/misc/config.sub build-aux/config.sub && cp /usr/share/misc/config.guess build-aux/config.guess && ./configure && make && make check && make install
 ENV LD_LIBRARY_PATH="/usr/local/lib:$LD_LIBRARY_PATH" \
     PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
 ARG VERSION
