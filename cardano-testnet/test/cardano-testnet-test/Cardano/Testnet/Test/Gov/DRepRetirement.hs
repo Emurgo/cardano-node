@@ -15,6 +15,7 @@ import           Cardano.Api
 import           Cardano.Testnet
 
 import           Prelude
+import           Control.Monad (void)
 
 import           Data.Default.Class
 import qualified Data.Text as Text
@@ -47,9 +48,10 @@ hprop_drep_retirement = integrationRetryWorkspace 2 "drep-retirement" $ \tempAbs
 
   work <- H.createDirectoryIfMissing $ tempAbsPath' </> "work"
 
-  let cardanoNodeEra = AnyShelleyBasedEra sbe
-      fastTestnetOptions = def { cardanoNodeEra }
-      shelleyOptions = def { genesisEpochLength = 50 } -- 50 * (1/10s) length, i.e. 5 seconds
+  let creationOptions = def
+        { creationEra = AnyShelleyBasedEra sbe
+        , creationGenesisOptions = def { genesisEpochLength = 50 } -- 50 * (1/10s) length, i.e. 5 seconds
+        }
 
   TestnetRuntime
     { testnetMagic
@@ -57,7 +59,7 @@ hprop_drep_retirement = integrationRetryWorkspace 2 "drep-retirement" $ \tempAbs
     , wallets=wallet0:_
     , configurationFile
     }
-    <- createAndRunTestnet fastTestnetOptions shelleyOptions conf
+    <- createAndRunTestnet creationOptions def conf
 
   node <- H.headM testnetNodes
   poolSprocket1 <- H.noteShow $ nodeSprocket node
@@ -83,14 +85,16 @@ hprop_drep_retirement = integrationRetryWorkspace 2 "drep-retirement" $ \tempAbs
   let sizeBefore = 3
   checkDRepsNumber epochStateView sbe sizeBefore
 
+  void $ H.createDirectoryIfMissing $ gov </> defaultDRepKeysDir
+
   -- Deregister first DRep
-  let dreprRetirementCertFile = gov </> "drep-keys" <> "drep1.retirementcert"
+  let drepRetirementCertFile = gov </> defaultDRepKeysDir </> "drep1.retirementcert"
 
   H.noteM_ $ execCli' execConfig
      [ "conway", "governance", "drep", "retirement-certificate"
      , "--drep-verification-key-file", verificationKeyFp $ defaultDRepKeyPair 1
      , "--deposit-amt", show @Int 1_000_000
-     , "--out-file", dreprRetirementCertFile
+     , "--out-file", drepRetirementCertFile
      ]
 
   H.noteM_ $ execCli' execConfig
@@ -109,7 +113,7 @@ hprop_drep_retirement = integrationRetryWorkspace 2 "drep-retirement" $ \tempAbs
     [ "conway", "transaction", "build"
     , "--tx-in", Text.unpack $ renderTxIn txin2
     , "--change-address", Text.unpack $ paymentKeyInfoAddr wallet0
-    , "--certificate-file", dreprRetirementCertFile
+    , "--certificate-file", drepRetirementCertFile
     , "--witness-override", "2"
     , "--out-file", drepRetirementRegTxbodyFp
     ]

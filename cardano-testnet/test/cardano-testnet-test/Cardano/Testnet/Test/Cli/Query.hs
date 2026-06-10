@@ -51,15 +51,15 @@ import           System.Directory (makeAbsolute)
 import           System.FilePath ((</>))
 
 import           Testnet.Components.Configuration (eraToString)
-import           Testnet.Components.Query (EpochStateView, checkDRepsNumber, getEpochStateView,
-                   getTxIx, watchEpochStateUpdate)
+import           Testnet.Components.Query (EpochStateView, TestnetWaitPeriod (..), checkDRepsNumber,
+                   getEpochStateDetails, getEpochStateView, getSlotNumber, getTxIx, retryUntilJustM)
 import qualified Testnet.Defaults as Defaults
 import           Testnet.Process.Cli.Transaction (TxOutAddress (..), mkSimpleSpendOutputsOnlyTx,
                    mkSpendOutputsOnlyTx, retrieveTransactionId, signTx, submitTx)
 import           Testnet.Process.Run (execCli', execCliStdoutToJson, mkExecConfig)
 import           Testnet.Process.RunIO (liftIOAnnotated)
 import           Testnet.Property.Util (integrationRetryWorkspace)
-import           Testnet.Start.Types (GenesisOptions (..), NumPools (..), cardanoNumPools)
+import           Testnet.Start.Types (GenesisOptions (..), NumPools (..), creationNumPools)
 import           Testnet.TestQueryCmds (TestQueryCmds (..), forallQueryCommands)
 import           Testnet.Types
 
@@ -86,14 +86,16 @@ hprop_cli_queries = integrationRetryWorkspace 2 "cli-queries" $ \tempAbsBasePath
       era = toCardanoEra sbe
       cEra = AnyCardanoEra era
       eraName = eraToString era
-      fastTestnetOptions = def { cardanoNodeEra = asbe }
-      shelleyOptions = def
-        { genesisEpochLength = 100
-        -- We change slotCoeff because epochLength must be equal to:
-        -- securityParam * 10 / slotCoeff
-        , genesisActiveSlotsCoeff = 0.5
+      fastTestnetOptions = def
+        { creationEra = asbe
+        , creationGenesisOptions = def
+            { genesisEpochLength = 100
+            -- We change slotCoeff because epochLength must be equal to:
+            -- securityParam * 10 / slotCoeff
+            , genesisActiveSlotsCoeff = 0.5
+            }
         }
-      nPools = cardanoNumPools fastTestnetOptions
+      nPools = creationNumPools fastTestnetOptions
 
   TestnetRuntime
     { testnetMagic
@@ -101,7 +103,7 @@ hprop_cli_queries = integrationRetryWorkspace 2 "cli-queries" $ \tempAbsBasePath
     , configurationFile
     , wallets=wallet0:wallet1:_
     }
-    <- createAndRunTestnet fastTestnetOptions shelleyOptions conf
+    <- createAndRunTestnet fastTestnetOptions def conf
 
   let shelleyGeneisFile = work </> Defaults.defaultGenesisFilepath ShelleyEra
 
@@ -341,7 +343,7 @@ hprop_cli_queries = integrationRetryWorkspace 2 "cli-queries" $ \tempAbsBasePath
 
         -- Wait until transaction is on chain and obtain transaction identifier
         txId <- retrieveTransactionId execConfig signedTx
-        txIx <- H.evalMaybeM $ watchEpochStateUpdate epochStateView (EpochInterval 2) (getTxIx sbe txId transferAmount)
+        txIx <- retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 2) $ getEpochStateDetails epochStateView >>= getTxIx sbe txId transferAmount
         -- Query the reference script size
         let protocolParametersOutFile = refScriptSizeWork </> "ref-script-size-out.json"
         H.noteM_ $ execCli' execConfig [ eraName, "query", "ref-script-size"
@@ -459,11 +461,11 @@ hprop_cli_queries = integrationRetryWorkspace 2 "cli-queries" $ \tempAbsBasePath
     -> ShelleyGenesis
     -> m SlotNo -- ^ The block number reached
   waitForFuturePParamsToStabilise epochStateView shelleyGenesisConf = withFrozenCallStack $
-    H.noteShowM . H.nothingFailM $
-      watchEpochStateUpdate epochStateView (EpochInterval 2) $ \(_, slotNo, _) -> do
-        pure $ if areFuturePParamsStable shelleyGenesisConf slotNo
-               then Just slotNo
-               else Nothing
+    H.noteShowM $ retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 2) $ do
+      slotNo <- getSlotNumber epochStateView
+      pure $ if areFuturePParamsStable shelleyGenesisConf slotNo
+             then Just slotNo
+             else Nothing
 
   -- We wait till a slot after: 4 * securityParam / slotCoeff
   -- If we query 'govState' before that we get 'PotentialPParamsUpdate'

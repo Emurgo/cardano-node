@@ -1,7 +1,7 @@
 cabal-version: 3.0
 
 name:                   tx-generator
-version:                2.15
+version:                2.16
 synopsis:               A transaction workload generator for Cardano clusters
 description:            A transaction workload generator for Cardano clusters.
 category:               Cardano,
@@ -86,6 +86,7 @@ library
                         Cardano.TxGenerator.Script.Types
                         Cardano.TxGenerator.Setup.NixService
                         Cardano.TxGenerator.Setup.NodeConfig
+                        Cardano.TxGenerator.Setup.TestnetDiscovery
                         Cardano.TxGenerator.Setup.Plutus
                         Cardano.TxGenerator.PlutusContext
                         Cardano.TxGenerator.Setup.SigningKey
@@ -108,9 +109,9 @@ library
                       , attoparsec-aeson
                       , base16-bytestring
                       , bytestring
-                      , cardano-api ^>= 10.26
+                      , cardano-api ^>= 11.0
                       , cardano-binary
-                      , cardano-cli ^>= 10.16
+                      , cardano-cli ^>= 11.0
                       , cardano-crypto-class
                       , cardano-crypto-wrapper
                       , cardano-data
@@ -127,6 +128,7 @@ library
                       , cborg >= 0.2.2 && < 0.3
                       , containers
                       , constraints-extras
+                      , directory
                       , dlist
                       , extra
                       , filepath
@@ -250,9 +252,21 @@ test-suite tx-generator-test
   type:                 exitcode-stdio-1.0
 
   build-depends:        base
+                      , aeson
+                      , bytestring
+                      , cardano-api
+                      , cardano-node
+                      , directory
+                      , extra
+                      , filepath
+                      , QuickCheck
                       , tasty
                       , tasty-hunit
+                      , tasty-quickcheck
+                      , temporary
                       , tx-generator
+
+  other-modules:        TestnetDiscoveryTest
 
   ghc-options:          -Weverything
                         -fno-warn-missing-import-lists

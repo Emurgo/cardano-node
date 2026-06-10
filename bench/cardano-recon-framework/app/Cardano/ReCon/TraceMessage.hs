@@ -5,17 +5,15 @@ module Cardano.ReCon.TraceMessage where
 import           Cardano.Logging
 import           Cardano.Logging.Prometheus.TCPServer (TracePrometheusSimple (..))
 import qualified Cardano.Logging.Types.TraceMessage as Envelop
-import           Cardano.ReCon.Common (extractProps)
-import           Cardano.ReCon.LTL.Lang.Formula (Formula, PropValue (..), Relevance)
-import qualified Cardano.ReCon.LTL.Lang.Formula.Prec as Prec
-import           Cardano.ReCon.LTL.Pretty (prettyFormula)
+import           Cardano.ReCon.LTL.Formula (Formula, Relevance)
+import qualified Cardano.ReCon.LTL.Formula.Prec as Prec
+import           Cardano.ReCon.LTL.Formula.Pretty (prettyFormula)
 import           Cardano.ReCon.LTL.Satisfy (SatisfactionResult (..))
 import           Cardano.ReCon.Trace.Feed (TemporalEvent (..))
 
-import           Data.Aeson (Value (..), (.=))
+import           Data.Aeson ((.=))
 import           Data.Aeson.Encode.Pretty
 import           Data.List (find)
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as Text
@@ -44,13 +42,14 @@ data TraceMessage = FormulaStartCheck {
                   | FormulaNegativeOutcome {
                       formula   :: Formula TemporalEvent Text,
                       relevance :: Relevance TemporalEvent Text,
-                      index :: Word
+                      index     :: Word
                   }
+                  | ContextDump { context :: [(Text, Text)] }
 
 -- | Smart constructor.
 formulaOutcome :: Formula TemporalEvent Text -> SatisfactionResult TemporalEvent Text -> Word -> TraceMessage
-formulaOutcome formula Satisfied         idx = FormulaPositiveOutcome formula idx
-formulaOutcome formula (Unsatisfied rel) idx = FormulaNegativeOutcome formula rel idx
+formulaOutcome formula Satisfied         idx = FormulaPositiveOutcome { formula, index = idx }
+formulaOutcome formula (Unsatisfied rel) idx = FormulaNegativeOutcome { formula, relevance = rel, index = idx }
 
 green :: Text -> Text
 green text = "\x001b[32m" <> text <> "\x001b[0m"
@@ -59,51 +58,49 @@ red :: Text -> Text
 red text = "\x001b[31m" <> text <> "\x001b[0m"
 
 prettyTraceMessage :: Envelop.TraceMessage -> Text
-prettyTraceMessage Envelop.TraceMessage{..} =
-  toStrict $ toLazyText $ encodePrettyToTextBuilder  $
-    Map.insert "at" (TextValue (showT tmsgAt))       $
-      Map.insert "namespace" (TextValue tmsgNS)      $
-        Map.insert "host" (TextValue tmsgHost)       $
-          Map.insert "thread" (TextValue tmsgThread) $
-            extractProps tmsgData
+prettyTraceMessage = toStrict . toLazyText . encodePrettyToTextBuilder
 
 prettyTemporalEvent :: TemporalEvent -> Text -> Text
 prettyTemporalEvent (TemporalEvent _ msgs) ns =
   maybe ("<<Unexpected namespace " <> ns <> ">>") prettyTraceMessage (find (\ x -> x.tmsgNS == ns) msgs)
 
+prettyRelevanceArray :: Relevance TemporalEvent Text -> Text
+prettyRelevanceArray rel =
+  Text.unlines $ "[" : fmap (uncurry prettyTemporalEvent) (Set.toList rel) ++ ["]"]
+
 prettySatisfactionResult :: Formula TemporalEvent Text -> SatisfactionResult TemporalEvent Text -> Text
 prettySatisfactionResult initial Satisfied = prettyFormula initial Prec.Universe <> " " <> green "(✔)"
 prettySatisfactionResult initial (Unsatisfied rel) =
   prettyFormula initial Prec.Universe <> red " (✗)" <> "\n"
-    <> Text.intercalate
-         "\n----------------------------------------------\n"
-         (fmap (uncurry prettyTemporalEvent) (Set.toList rel))
+  <> prettyRelevanceArray rel
 
 instance LogFormatting TraceMessage where
   forMachine _ FormulaStartCheck{..} = mconcat
     [
-      "formula" .= String (prettyFormula formula Prec.Universe),
+      "formula" .= prettyFormula formula Prec.Universe,
       "index" .= index
     ]
   forMachine _ FormulaProgressDump{..} = mconcat
     [
-      "events_per_second" .= Number (fromIntegral eventsPerSecond),
-      "catch_up_ratio" .= Number (realToFrac catchupRatio),
+      "eventsPerSecond" .= (fromIntegral eventsPerSecond :: Int),
+      "catchUpRatio" .= (realToFrac catchupRatio :: Double),
       "index" .= index
     ]
   forMachine _ FormulaPositiveOutcome{..} = mconcat
     [
-      "formula" .= String (prettyFormula formula Prec.Universe),
+      "formula" .= prettyFormula formula Prec.Universe,
       "index" .= index
     ]
   forMachine _ FormulaNegativeOutcome{..} = mconcat
     [
-      "formula" .= String (prettyFormula formula Prec.Universe)
+      "formula" .= prettyFormula formula Prec.Universe
     ,
-      "relevance" .= String (showT relevance)
+      "relevance" .= showT relevance
     ,
       "index" .= index
     ]
+  forMachine _ ContextDump{..} = mconcat
+    [ "context" .= context ]
 
   forHuman FormulaStartCheck{..} =
     "Starting satisfiability check on formula #" <> showT index <> ": " <> prettyFormula formula Prec.Universe
@@ -119,16 +116,21 @@ instance LogFormatting TraceMessage where
     prettySatisfactionResult formula Satisfied
   forHuman FormulaNegativeOutcome{..} =
     prettySatisfactionResult formula (Unsatisfied relevance)
+  forHuman ContextDump{..} =
+    Text.unlines $ "Context:" : map (\(k, v) -> "  " <> k <> " = " <> v) context
 
   asMetrics FormulaStartCheck{} = []
   asMetrics (FormulaProgressDump {catchupRatio, index}) = [DoubleM ("catchup_ratio_" <> showT index) catchupRatio]
   asMetrics FormulaPositiveOutcome{} = []
   asMetrics FormulaNegativeOutcome{} = []
+  asMetrics ContextDump{} = []
 
 
 instance MetaTrace TraceMessage where
   allNamespaces =
     [
+      Namespace [] ["ContextDump"]
+    ,
       Namespace [] ["FormulaStartCheck"]
     ,
       Namespace [] ["FormulaProgressDump"]
@@ -136,11 +138,13 @@ instance MetaTrace TraceMessage where
       Namespace [] ["FormulaOutcome"]
     ]
 
+  namespaceFor ContextDump{}            = Namespace [] ["ContextDump"]
   namespaceFor FormulaStartCheck{}      = Namespace [] ["FormulaStartCheck"]
   namespaceFor FormulaProgressDump{}    = Namespace [] ["FormulaProgressDump"]
   namespaceFor FormulaPositiveOutcome{} = Namespace [] ["FormulaPositiveOutcome"]
   namespaceFor FormulaNegativeOutcome{} = Namespace [] ["FormulaNegativeOutcome"]
 
+  severityFor (Namespace [] ["ContextDump"])            _ = Just Debug
   severityFor (Namespace [] ["FormulaStartCheck"])       _ = Just Info
   severityFor (Namespace [] ["FormulaProgressDump"])     _ = Just Debug
   severityFor (Namespace [] ["FormulaPositiveOutcome"])  _ = Just Info
@@ -149,6 +153,8 @@ instance MetaTrace TraceMessage where
 
   detailsFor _ _ =  Just DNormal
 
+  documentFor (Namespace [] ["ContextDump"]) =
+    Just "Dump of the context variables supplied to the formula parser."
   documentFor (Namespace [] ["FormulaStartCheck"]) =
     Just "Formula satisfiability check has started."
   documentFor (Namespace [] ["FormulaProgressDump"]) =

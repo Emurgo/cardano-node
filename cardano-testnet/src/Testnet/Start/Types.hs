@@ -8,32 +8,34 @@
 
 module Testnet.Start.Types
   ( CardanoTestnetCliOptions(..)
+  , NoUserProvidedEnvOptions(..)
+  , StartFromEnvOptions(..)
   , CardanoTestnetCreateEnvOptions (..)
-  , CardanoTestnetOptions(..)
+  , TestnetCreationOptions(..)
+  , TestnetRuntimeOptions(..)
+  , TestnetEnvOptions(..)
   , InputNodeConfigFile(..)
   , NodeId(..)
   , NumDReps(..)
   , NumPools(..)
   , NumRelays(..)
   , RpcSupport(..)
-  , cardanoNumPools
-  , cardanoNumRelays
+  , creationNumPools
+  , creationNumRelays
 
   , anyEraToString
   , anyShelleyBasedEraToString
   , defaultTestnetMagic
   , eraToString
 
-  , CreateEnvOptions(..)
   , UpdateTimestamps(..)
   , TestnetOnChainParams(..)
   , mainnetParamsRequest
-  , NodeOption(..)
-  , isRelayNodeOptions
-  , cardanoDefaultTestnetNodeOptions
+  , TestnetNodesWithOptions(..)
+  , NodeWithOptions(..)
+  , cardanoDefaultTestnetNodesWithOptions
   , GenesisOptions(..)
   , UserProvidedData(..)
-  , UserProvidedEnv(..)
   , UserProvidedGeneses(..)
   , PraosCredentialsSource(..)
 
@@ -77,47 +79,34 @@ import qualified Hedgehog.Extras as H
 defaultTestnetMagic :: Int
 defaultTestnetMagic = 42
 
--- | Command line options for the @cardano-testnet@ executable. They are used
--- in the parser, and then get split into 'CardanoTestnetOptions' and
--- 'GenesisOptions'. If 'cliNodeEnvironment' is provided, don't create a
--- sandbox environment, use the one at the given path.
-data CardanoTestnetCliOptions = CardanoTestnetCliOptions
-  { cliTestnetOptions :: CardanoTestnetOptions
-  , cliGenesisOptions :: GenesisOptions
-  , cliNodeEnvironment :: UserProvidedEnv
-  , cliUpdateTimestamps :: UpdateTimestamps
-  , cliOnChainParams :: TestnetOnChainParams
-  } deriving (Eq, Show)
-
-instance Default CardanoTestnetCliOptions where
-  def = CardanoTestnetCliOptions
-    { cliTestnetOptions = def
-    , cliGenesisOptions = def
-    , cliNodeEnvironment = def
-    , cliUpdateTimestamps = def
-    , cliOnChainParams = def
-    }
-
-data UserProvidedEnv
-  = NoUserProvidedEnv
-  | UserProvidedEnv FilePath
+-- | Command line options for the @cardano-testnet cardano@ command.
+-- Either create a new testnet environment or use a pre-existing one
+-- (created by @create-env@).
+data CardanoTestnetCliOptions
+  = NoUserProvidedEnv NoUserProvidedEnvOptions
+  | StartFromEnv StartFromEnvOptions
   deriving (Eq, Show)
 
-instance Default UserProvidedEnv where
-  def = NoUserProvidedEnv
+-- | Options for @cardano-testnet cardano@ when no user-provided environment
+-- is given: create a new environment and then start the testnet.
+data NoUserProvidedEnvOptions = NoUserProvidedEnvOptions
+  { noEnvCreationOptions :: TestnetCreationOptions
+  , noEnvOutputDir :: Maybe FilePath -- ^ @--output-dir@, uses a temporary directory if absent
+  , noEnvRuntimeOptions :: TestnetRuntimeOptions
+  } deriving (Eq, Show)
+
+-- | Options for @cardano-testnet cardano --node-env@ when starting a testnet
+-- from a pre-existing environment (created by @create-env@).
+data StartFromEnvOptions = StartFromEnvOptions
+  { fromEnvOptions :: TestnetEnvOptions
+  , fromEnvRuntimeOptions :: TestnetRuntimeOptions
+  } deriving (Eq, Show)
 
 data UpdateTimestamps = UpdateTimestamps | DontUpdateTimestamps
   deriving (Eq, Show)
 
 instance Default UpdateTimestamps where
   def = DontUpdateTimestamps
-
-newtype CreateEnvOptions = CreateEnvOptions
-  { ceoOnChainParams :: TestnetOnChainParams
-  } deriving (Eq, Show)
-
-instance Default CreateEnvOptions where
-  def = CreateEnvOptions { ceoOnChainParams = def }
 
 data TestnetOnChainParams
   = DefaultParams
@@ -170,11 +159,11 @@ instance FromJSON NodeId where
       Left _ -> parseFail $ "Incorrect format for NodeId: " ++ show t
     _ -> parseFail $ "Incorrect format for NodeId: " ++ show t
 
+-- | Command line options for the @cardano-testnet create-env@ subcommand.
+-- Creates a sandbox environment without starting nodes.
 data CardanoTestnetCreateEnvOptions = CardanoTestnetCreateEnvOptions
-  { createEnvTestnetOptions :: CardanoTestnetOptions
-  , createEnvGenesisOptions :: GenesisOptions
-  , createEnvOutputDir :: FilePath
-  , createEnvCreateEnvOptions :: CreateEnvOptions
+  { createEnvCreationOptions :: TestnetCreationOptions
+  , createEnvOutputDir :: FilePath -- ^ Required @--output@ directory
   } deriving (Eq, Show)
 
 data RpcSupport
@@ -182,34 +171,64 @@ data RpcSupport
   | RpcEnabled
   deriving (Eq, Show)
 
--- | Options which, contrary to 'GenesisOptions' are not implemented
--- by tuning the genesis files.
-data CardanoTestnetOptions = CardanoTestnetOptions
+-- | Options for creating a testnet environment (genesis files, topology, ports).
+-- Used by both the @cardano@ and @create-env@ subcommands, and by
+-- 'Testnet.Start.Cardano.createAndRunTestnet' in tests.
+data TestnetCreationOptions = TestnetCreationOptions
   { -- | Options controlling how many nodes to create and of which type.
-    cardanoNodes :: NonEmpty NodeOption
-  , cardanoNodeEra :: AnyShelleyBasedEra -- ^ The era to start at
-  , cardanoMaxSupply :: Word64 -- ^ The amount of Lovelace you are starting your testnet with (forwarded to shelley genesis)
-                               -- TODO move me to GenesisOptions when https://github.com/IntersectMBO/cardano-cli/pull/874 makes it to cardano-node
-  , cardanoNodeLoggingFormat :: NodeLoggingFormat
-  , cardanoNumDReps :: NumDReps -- ^ The number of DReps to generate at creation
-  , cardanoEnableNewEpochStateLogging :: Bool -- ^ if epoch state logging is enabled
-  , cardanoOutputDir :: UserProvidedEnv -- ^ The output directory where to store files, sockets, and so on. If unset, a temporary directory is used.
-  , cardanoEnableRpc :: RpcSupport
-  -- ^ Whether to enable gRPC endpoints in all testnet nodes
-  , cardanoKESSource :: PraosCredentialsSource
+    creationNodes :: TestnetNodesWithOptions
+  , creationEra :: AnyShelleyBasedEra -- ^ The era to start at
+  , creationMaxSupply :: Word64 -- ^ The amount of Lovelace you are starting your testnet with (forwarded to shelley genesis)
+                                -- TODO move me to GenesisOptions when https://github.com/IntersectMBO/cardano-cli/pull/874 makes it to cardano-node
+  , creationNumDReps :: NumDReps -- ^ The number of DReps to generate at creation
+  , creationGenesisOptions :: GenesisOptions
+  , creationOnChainParams :: TestnetOnChainParams
+  } deriving (Eq, Show)
+
+instance Default TestnetCreationOptions where
+  def = TestnetCreationOptions
+    { creationNodes = cardanoDefaultTestnetNodesWithOptions
+    , creationEra = AnyShelleyBasedEra ShelleyBasedEraConway
+    , creationMaxSupply = 100_000_020_000_000
+    , creationNumDReps = 3
+    , creationGenesisOptions = def
+    , creationOnChainParams = def
+    }
+
+-- | Options for running testnet nodes (after the environment is created).
+-- These are independent of how the environment was created (from scratch
+-- or from an existing @--node-env@ path).
+data TestnetRuntimeOptions = TestnetRuntimeOptions
+  { runtimeEnableNewEpochStateLogging :: Bool -- ^ if epoch state logging is enabled
+  , runtimeEnableRpc :: RpcSupport -- ^ Whether to enable gRPC endpoints in all testnet nodes
+  , runtimeKESSource :: PraosCredentialsSource
+  } deriving (Eq, Show)
+
+instance Default TestnetRuntimeOptions where
+  def = TestnetRuntimeOptions
+    { runtimeEnableNewEpochStateLogging = True
+    , runtimeEnableRpc = RpcDisabled
+    , runtimeKESSource = def
+    }
+
+-- | Options specific to the @--node-env@ path: the environment directory
+-- and whether to update genesis timestamps before starting.
+data TestnetEnvOptions = TestnetEnvOptions
+  { envPath :: FilePath -- ^ Path to the pre-existing environment
+  , envUpdateTimestamps :: UpdateTimestamps
   } deriving (Eq, Show)
 
 -- | Path to the configuration file of the node, specified by the user
 newtype InputNodeConfigFile = InputNodeConfigFile FilePath
   deriving (Eq, Show)
 
-cardanoNumPools :: CardanoTestnetOptions -> NumPools
-cardanoNumPools CardanoTestnetOptions{cardanoNodes} =
-  NumPools $ length $ NEL.filter isSpoNodeOptions cardanoNodes
+creationNumPools :: TestnetCreationOptions -> NumPools
+creationNumPools TestnetCreationOptions{creationNodes} =
+  NumPools $ NEL.length $ optSpoNodes creationNodes
 
-cardanoNumRelays :: CardanoTestnetOptions -> NumRelays
-cardanoNumRelays CardanoTestnetOptions{cardanoNodes} =
-  NumRelays $ length $ NEL.filter isRelayNodeOptions cardanoNodes
+creationNumRelays :: TestnetCreationOptions -> NumRelays
+creationNumRelays TestnetCreationOptions{creationNodes} =
+  NumRelays $ length $ optRelayNodes creationNodes
 
 -- | Number of stake pool nodes
 newtype NumPools = NumPools Int
@@ -222,19 +241,6 @@ newtype NumRelays = NumRelays Int
 -- | Number of Delegate Represenatives
 newtype NumDReps = NumDReps Int
   deriving (Show, Read, Eq, Enum, Ord, Num, Real, Integral) via Int
-
-instance Default CardanoTestnetOptions where
-  def = CardanoTestnetOptions
-    { cardanoNodes = cardanoDefaultTestnetNodeOptions
-    , cardanoNodeEra = AnyShelleyBasedEra ShelleyBasedEraConway
-    , cardanoMaxSupply = 100_000_020_000_000 -- 100 000 billions Lovelace, so 100 millions ADA. This amount should be bigger than the 'byronTotalBalance' in Testnet.Start.Byron
-    , cardanoNodeLoggingFormat = NodeLoggingFormatAsJson
-    , cardanoNumDReps = 3
-    , cardanoEnableNewEpochStateLogging = True
-    , cardanoOutputDir = def
-    , cardanoEnableRpc = RpcDisabled
-    , cardanoKESSource = def -- TODO(10.7): use default value
-    }
 
 -- | Options that are implemented by writing fields in the Shelley genesis file.
 data GenesisOptions = GenesisOptions
@@ -252,12 +258,23 @@ instance Default GenesisOptions where
     , genesisActiveSlotsCoeff = 0.05
     }
 
--- | Whether a node should be an SPO or just a relay.
--- The '@String' arguments will be appended to the default options when starting the node.
-data NodeOption
-  = SpoNodeOptions [String]
-  | RelayNodeOptions [String]
-  deriving (Eq, Show)
+-- | Configuration specific to each node
+data NodeWithOptions = NodeWithOptions
+  { nodeBin :: Maybe FilePath
+    -- ^ Path to the @cardano-node@ binary to use for running this node.
+    -- This allows testing different node versions side by side in the same testnet
+    -- (e.g. to verify compatibility across upgrades).
+    -- 'Nothing' uses the default resolution: the @CARDANO_NODE@ environment variable
+    -- if set, otherwise the binary path from cabal's @plan.json@.
+  , nodeExtraCliArgs :: [String] -- ^ Extra CLI arguments passed to @cardano-node run@
+  } deriving (Eq, Show)
+
+-- | Specifies the nodes to create for the testnet, split by role (SPO and relay).
+-- SPO nodes participate in block production. Relay nodes only forward blocks.
+data TestnetNodesWithOptions = TestnetNodesWithOptions
+  { optSpoNodes :: NonEmpty NodeWithOptions -- ^ SPO (stake pool operator) nodes. Must have at least one.
+  , optRelayNodes :: [NodeWithOptions] -- ^ Relay (non-producing) nodes
+  } deriving (Eq, Show)
 
 -- | Type used to track whether the user is providing its data (node configuration file path, genesis file, etc.)
 -- or whether it needs to be programmatically generated by @cardanoTestnet@ and friends.
@@ -269,19 +286,13 @@ data UserProvidedData a =
 instance Default (UserProvidedData a) where
   def = NoUserProvidedData
 
-isSpoNodeOptions :: NodeOption -> Bool
-isSpoNodeOptions SpoNodeOptions{} = True
-isSpoNodeOptions RelayNodeOptions{} = False
-
-isRelayNodeOptions :: NodeOption -> Bool
-isRelayNodeOptions SpoNodeOptions{} = False
-isRelayNodeOptions RelayNodeOptions{} = True
-
-cardanoDefaultTestnetNodeOptions :: NonEmpty NodeOption
-cardanoDefaultTestnetNodeOptions =
-  SpoNodeOptions [] :| [ RelayNodeOptions []
-                       , RelayNodeOptions []
-                       ]
+cardanoDefaultTestnetNodesWithOptions :: TestnetNodesWithOptions
+cardanoDefaultTestnetNodesWithOptions = TestnetNodesWithOptions
+  { optSpoNodes = NodeWithOptions Nothing [] :| []
+  , optRelayNodes = [ NodeWithOptions Nothing []
+                    , NodeWithOptions Nothing []
+                    ]
+  }
 
 data NodeLoggingFormat
   = NodeLoggingFormatAsJson

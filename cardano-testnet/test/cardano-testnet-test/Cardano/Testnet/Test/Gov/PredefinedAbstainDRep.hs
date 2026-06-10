@@ -63,7 +63,7 @@ import qualified Hedgehog.Extras as H
 -- Execute me with:
 -- @DISABLE_RETRIES=1 cabal test cardano-testnet-test --test-options '-p "/Predefined Abstain DRep/"'@
 hprop_check_predefined_abstain_drep :: Property
-hprop_check_predefined_abstain_drep = H.integrationWorkspace "test-activity" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
+hprop_check_predefined_abstain_drep = H.integrationRetryWorkspace 2 "test-activity" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   -- Start a local test net
   conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
@@ -73,11 +73,11 @@ hprop_check_predefined_abstain_drep = H.integrationWorkspace "test-activity" $ \
   -- Create default testnet with 3 DReps and 3 stake holders delegated, one to each DRep.
   let ceo = ConwayEraOnwardsConway
       sbe = convert ceo
-      fastTestnetOptions = def
-        { cardanoNodeEra = AnyShelleyBasedEra sbe
-        , cardanoNumDReps = 3
+      creationOptions = def
+        { creationEra = AnyShelleyBasedEra sbe
+        , creationNumDReps = 3
+        , creationGenesisOptions = def { genesisEpochLength = 200 }
         }
-      shelleyOptions = def { genesisEpochLength = 200 }
 
   TestnetRuntime
     { testnetMagic
@@ -85,7 +85,7 @@ hprop_check_predefined_abstain_drep = H.integrationWorkspace "test-activity" $ \
     , wallets=wallet0:wallet1:wallet2:_
     , configurationFile
     }
-    <- createAndRunTestnet fastTestnetOptions shelleyOptions conf
+    <- createAndRunTestnet creationOptions def conf
 
   node <- H.headM testnetNodes
   poolSprocket1 <- H.noteShow $ nodeSprocket node
@@ -287,8 +287,8 @@ makeDesiredPoolNumberChangeProposal execConfig epochStateView ceo work prefix
   governanceActionTxId <- retrieveTransactionId execConfig signedProposalTx
 
   governanceActionIndex <-
-    H.nothingFailM $ watchEpochStateUpdate epochStateView (EpochInterval 1) $ \(anyNewEpochState, _, _) ->
-      pure $ maybeExtractGovernanceActionIndex governanceActionTxId anyNewEpochState
+    retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 1)
+      $ maybeExtractGovernanceActionIndex governanceActionTxId <$> getEpochState epochStateView
 
   pure (governanceActionTxId, governanceActionIndex)
 

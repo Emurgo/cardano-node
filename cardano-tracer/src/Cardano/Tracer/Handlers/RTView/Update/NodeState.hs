@@ -13,6 +13,7 @@ import           Cardano.Tracer.Handlers.RTView.UI.Utils
 import           Cardano.Tracer.Handlers.RTView.Utils
 import           Cardano.Tracer.Handlers.Utils
 import           Cardano.Tracer.Types
+import           Cardano.Tracer.Utils (NodeStateWrapper (..))
 
 import           Control.Monad.Extra (unless, whenJustM)
 import           Data.Aeson

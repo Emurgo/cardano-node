@@ -29,8 +29,6 @@ import qualified Cardano.Node.Protocol.Dijkstra as Dijkstra
 import qualified Cardano.Node.Protocol.Shelley as Shelley
 import           Cardano.Node.Protocol.Types
 import           Cardano.Node.Types
-import           Cardano.Tracing.OrphanInstances.Byron ()
-import           Cardano.Tracing.OrphanInstances.Shelley ()
 import           Ouroboros.Consensus.Cardano
 import qualified Ouroboros.Consensus.Cardano as Consensus
 import           Ouroboros.Consensus.Cardano.Condense ()
@@ -181,8 +179,8 @@ mkSomeConsensusProtocolCardano NodeByronProtocolConfiguration {
           shelleyBasedLeaderCredentials = shelleyLeaderCredentials
         }
       , Consensus.cardanoProtocolVersion = if npcExperimentalHardForksEnabled
-                                           then ProtVer (natVersion @11) 0
-                                           else ProtVer (natVersion @10) 8
+                                           then ProtVer (natVersion @12) 0
+                                           else ProtVer (natVersion @11) 0
         -- The remaining arguments specify the parameters needed to transition between two eras
       , Consensus.cardanoLedgerTransitionConfig =
           Ledger.mkLatestTransitionConfig

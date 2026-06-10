@@ -98,7 +98,7 @@ LedgerDB:
 
 # Min is currently 10.7.0 due to change of config bundled peer-snapshot
 # version.
-MinNodeVersion: 10.7.0
+MinNodeVersion: "10.7.0"
 
 ##### Logging configuration #####
 

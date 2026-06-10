@@ -207,7 +207,7 @@ in with final;
   );
 
   # Disable failing python uvloop tests
-  python310 = prev.python310.override {
+  python311 = prev.python311.override {
     packageOverrides = pythonFinal: pythonPrev: {
       uvloop = pythonPrev.uvloop.overrideAttrs (attrs: {
         disabledTestPaths = [ "tests/test_tcp.py" "tests/test_sourcecode.py" "tests/test_dns.py" ];

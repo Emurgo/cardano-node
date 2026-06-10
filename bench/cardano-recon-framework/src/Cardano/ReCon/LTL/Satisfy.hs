@@ -9,10 +9,12 @@ module Cardano.ReCon.LTL.Satisfy(
   , SatisfyMetrics(..)
   ) where
 
-import           Cardano.ReCon.LTL.Lang.Formula
-import           Cardano.ReCon.LTL.Lang.HomogeneousFormula (eval)
-import           Cardano.ReCon.LTL.Progress
-import           Cardano.ReCon.LTL.Rewrite
+import           Cardano.ReCon.LTL.Formula
+import           Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula (eval)
+import           Cardano.ReCon.LTL.Internal.Progress
+import           Cardano.ReCon.LTL.Internal.Rewrite
+
+import           Control.Monad.Reader (runReader)
 
 import           Prelude hiding (Foldable (..), lookup)
 
@@ -23,8 +25,8 @@ import           Data.Word (Word64)
 import           Streaming
 
 #ifdef TRACE
-import qualified Cardano.ReCon.LTL.Lang.Formula.Prec       as Prec
-import           Cardano.ReCon.LTL.Pretty                  (prettyFormula)
+import qualified Cardano.ReCon.LTL.Formula.Prec       as Prec
+import           Cardano.ReCon.LTL.Formula.Pretty     (prettyFormula)
 import qualified Data.Text                                 as Text
 import           Debug.Trace                               (trace)
 #endif
@@ -35,27 +37,28 @@ import           Debug.Trace                               (trace)
 --   or effectful and potentially infinite (i.e. a Stream, cf. `satisfiesS`).
 
 -- | The result of checking satisfaction of a formula against a timeline.
--- | If unsatisfied, stores points in the timeline "relevant" to the formula.
+--   If unsatisfied, stores points in the timeline "relevant" to the formula.
 data SatisfactionResult event ty = Satisfied | Unsatisfied (Relevance event ty) deriving (Show, Eq)
 
 traceFormula :: Show ty => String -> Formula event ty -> Formula event ty
 traceFormula ~str x =
 #ifdef TRACE
+
   trace (str <> " " <> Text.unpack (prettyFormula x Prec.Universe)) x
 #else
   x
 #endif
 
 handleNext :: (Event event ty, Ord event, Ord ty, Show ty)
-           => (Int, Formula event ty)
+           => OnMissingKey
+           -> (Int, Formula event ty)
            -> event
            -> Either (SatisfactionResult event ty) (Int, Formula event ty)
-handleNext (!n, !formula0) m =
+handleNext omk (!n, !formula0) m =
   let formula1 = traceFormula ("(" <> show (1 + n) <> ")\ninitial:") formula0
-      formula2 = traceFormula "next:" $ next formula1 m
+      formula2 = traceFormula "next:" $ runReader (next formula1 m) omk
       formula3 = traceFormula "rewrite-hom:" (rewriteHomogeneous formula2)
-      formula4 = traceFormula "rewrite-frag:" $ rewriteFragment formula3
-      formula5 = traceFormula "rewrite-id:" (rewriteIdentity formula4) in
+      formula5 = traceFormula "rewrite-id:" (rewriteIdentity formula3) in
   case formula5 of
     Top     -> Left Satisfied
     Bottom  -> Left (Unsatisfied (relevance formula0))
@@ -69,10 +72,11 @@ handleEnd (!n, !formula) =
 
 -- | Check if the formula is satisfied in the given event timeline.
 satisfies :: (Event event ty, Ord event, Ord ty, Show ty, Foldable f)
-          => Formula event ty
+          => OnMissingKey
+          -> Formula event ty
           -> f event
           -> SatisfactionResult event ty
-satisfies formula xs = fromEither $ handleEnd <$> foldl' (\acc e -> acc >>= flip handleNext e) (Right (0, formula)) xs
+satisfies omk formula xs = fromEither $ handleEnd <$> foldl' (\acc e -> acc >>= flip (handleNext omk) e) (Right (0, formula)) xs
   where
     fromEither :: Either a a -> a
     fromEither = either id id
@@ -88,11 +92,12 @@ data SatisfyMetrics event ty = SatisfyMetrics {
 --    the formula is equivalent to ⊤ or ⊥. This may happen either once the stream terminates or if
 --    the formula is falsified early by some prefix of the stream.
 satisfiesS :: (Event event ty, Ord event, Ord ty, Show ty)
-           => Formula event ty
+           => OnMissingKey
+           -> Formula event ty
            -> Stream (Of event) IO ()
            -> IORef (SatisfyMetrics event ty)
            -> IO (SatisfactionResult event ty)
-satisfiesS formula_ input_ metrics_ = run $ mapped (pure. pure . runIdentity) $ unfold (go metrics_) (0, formula_,  input_) where
+satisfiesS omk formula_ input_ metrics_ = run $ mapped (pure. pure . runIdentity) $ unfold (go metrics_) (0, formula_,  input_) where
   go :: (Event event ty, Ord event, Ord ty, Show ty)
      => IORef (SatisfyMetrics event ty)
      -> (Int, Formula event ty, Stream (Of event) IO ())
@@ -105,4 +110,4 @@ satisfiesS formula_ input_ metrics_ = run $ mapped (pure. pure . runIdentity) $ 
       pure $
         fmap
           (\(!n', !formula') -> Identity (n', formula', more))
-          (handleNext (n, formula) event)
+          (handleNext omk (n, formula) event)

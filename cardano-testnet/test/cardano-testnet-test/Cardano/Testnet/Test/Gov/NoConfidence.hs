@@ -9,7 +9,7 @@ module Cardano.Testnet.Test.Gov.NoConfidence
   ) where
 
 import           Cardano.Api
-import           Cardano.Api.Experimental (Some (..))
+import           Cardano.Api.Experimental (Some (..), obtainCommonConstraints)
 import           Cardano.Api.Ledger
 
 import qualified Cardano.Ledger.Conway.Genesis as L
@@ -33,13 +33,13 @@ import           System.FilePath ((</>))
 import           Testnet.Components.Configuration
 import           Testnet.Components.Query
 import           Testnet.Defaults
-import           Testnet.EpochStateProcessing (waitForGovActionVotes)
+import           Testnet.EpochStateProcessing (unsafeEraFromSbe, waitForGovActionVotes)
 import qualified Testnet.Process.Cli.DRep as DRep
 import           Testnet.Process.Cli.Keys
 import qualified Testnet.Process.Cli.SPO as SPO
 import           Testnet.Process.Cli.Transaction
 import qualified Testnet.Process.Run as H
-import           Testnet.Property.Util (integrationWorkspace)
+import           Testnet.Property.Util (integrationRetryWorkspace)
 import           Testnet.Start.Cardano (liftToIntegration)
 import           Testnet.Start.Types
 import           Testnet.Types
@@ -54,7 +54,7 @@ import qualified Hedgehog.Extras.Stock.IO.Network.Sprocket as IO
 -- Generate a testnet with a committee defined in the Conway genesis. Submit a motion of no confidence
 -- and have the required threshold of SPOs and DReps vote yes on it.
 hprop_gov_no_confidence :: Property
-hprop_gov_no_confidence = integrationWorkspace "no-confidence" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
+hprop_gov_no_confidence = integrationRetryWorkspace 2 "no-confidence" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
 
   conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
@@ -67,15 +67,14 @@ hprop_gov_no_confidence = integrationWorkspace "no-confidence" $ \tempAbsBasePat
       asbe = AnyShelleyBasedEra sbe
       era = toCardanoEra sbe
       cEra = AnyCardanoEra era
-      fastTestnetOptions = def { cardanoNodeEra = asbe  }
-      genesisOptions = def { genesisEpochLength = 200 }
+      creationOptions = def { creationEra = asbe, creationGenesisOptions = def { genesisEpochLength = 200 } }
 
   execConfigOffline <- H.mkExecConfigOffline tempBaseAbsPath
 
   -- Step 1. Define generate and define a committee in the genesis file
 
   -- Create committee cold key
-  H.createDirectoryIfMissing_ $ tempAbsPath' </> work </> "committee-keys"
+  H.createDirectoryIfMissing_ $ tempAbsPath' </> work </> defaultCommitteeKeysDir
   H.forConcurrently_ [1] $ \n -> do
     H.execCli' execConfigOffline
       [ eraToString sbe, "governance", "committee"
@@ -103,7 +102,7 @@ hprop_gov_no_confidence = integrationWorkspace "no-confidence" $ \tempAbsBasePat
       committeeThreshold = unsafeBoundedRational 0.5
       committee = L.Committee (Map.fromList [(comKeyCred1, EpochNo 100)]) committeeThreshold
 
-  liftToIntegration $ createTestnetEnv fastTestnetOptions genesisOptions def conf
+  liftToIntegration $ createTestnetEnv creationOptions conf
 
   H.rewriteJsonFile (tempAbsBasePath' </> "conway-genesis.json") $
     \conwayGenesis -> conwayGenesis { L.cgCommittee = committee }
@@ -113,7 +112,7 @@ hprop_gov_no_confidence = integrationWorkspace "no-confidence" $ \tempAbsBasePat
     , testnetNodes
     , wallets=wallet0:_wallet1:_
     , configurationFile
-    } <- liftToIntegration $ cardanoTestnet fastTestnetOptions conf
+    } <- liftToIntegration $ cardanoTestnet (creationNodes creationOptions) def conf
 
   poolNode1 <- H.headM testnetNodes
   poolSprocket1 <- H.noteShow $ nodeSprocket poolNode1
@@ -129,8 +128,7 @@ hprop_gov_no_confidence = integrationWorkspace "no-confidence" $ \tempAbsBasePat
 
   epochStateView <- getEpochStateView configurationFile (File socketPath)
 
-  H.nothingFailM $ watchEpochStateUpdate epochStateView (EpochInterval 3) $ \anyNewEpochState->
-    pure $ committeeIsPresent True anyNewEpochState
+  retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 3) $ committeeIsPresent True <$> getEpochStateDetails epochStateView
 
   -- Step 2. Propose motion of no confidence. DRep and SPO voting thresholds must be met.
 
@@ -189,8 +187,7 @@ hprop_gov_no_confidence = integrationWorkspace "no-confidence" $ \tempAbsBasePat
   governanceActionTxId <- retrieveTransactionId execConfig signedProposalTx
 
   governanceActionIndex <-
-    H.nothingFailM $ watchEpochStateUpdate epochStateView (EpochInterval 10) $ \(anyNewEpochState, _, _) ->
-      pure $ maybeExtractGovernanceActionIndex governanceActionTxId anyNewEpochState
+    retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 10) $ maybeExtractGovernanceActionIndex governanceActionTxId <$> getEpochState epochStateView
 
   let spoVotes :: [(String, Int)]
       spoVotes =  [("yes", 1), ("yes", 2), ("no", 3)]
@@ -238,25 +235,18 @@ hprop_gov_no_confidence = integrationWorkspace "no-confidence" $ \tempAbsBasePat
 
   -- Step 4. We confirm the no confidence motion has been ratified by checking
   -- for an empty constitutional committee.
-  H.nothingFailM $ watchEpochStateUpdate epochStateView (EpochInterval 10) (return . committeeIsPresent False)
+  retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 10) $ committeeIsPresent False <$> getEpochStateDetails epochStateView
 
 -- | Checks if the committee is empty or not.
 committeeIsPresent :: Bool -> (AnyNewEpochState, SlotNo, BlockNo) -> Maybe ()
 committeeIsPresent committeeExists (AnyNewEpochState sbe newEpochState _, _, _) =
-  caseShelleyToBabbageOrConwayEraOnwards
-    (const $ error "Constitutional committee does not exist pre-Conway era")
-    (const $ let mCommittee = newEpochState
-                                ^. L.nesEsL
-                                 . L.esLStateL
-                                 . L.lsUTxOStateL
-                                 . L.utxosGovStateL
-                                 . L.cgsCommitteeL
-            in if committeeExists
-               then if isSJust mCommittee
-                    then Just () -- The committee is non empty and we terminate.
-                    else Nothing
-               else if mCommittee == SNothing
-                    then Just ()  -- The committee is empty and we terminate.
-                    else Nothing
-    )
-    sbe
+  obtainCommonConstraints (unsafeEraFromSbe sbe) $ do
+    let mCommittee = newEpochState
+                       ^. L.nesEsL
+                        . L.esLStateL
+                        . L.lsUTxOStateL
+                        . L.utxosGovStateL
+                        . L.cgsCommitteeL
+    guard $ if committeeExists
+      then isSJust mCommittee    -- The committee is non empty and we terminate.
+      else mCommittee == SNothing -- The committee is empty and we terminate.

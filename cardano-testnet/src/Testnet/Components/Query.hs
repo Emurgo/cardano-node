@@ -14,7 +14,7 @@ module Testnet.Components.Query
   , getEpochState
   , getSlotNumber
   , getBlockNumber
-  , watchEpochStateUpdate
+  , getEpochStateDetails
 
   , getMinDRepDeposit
   , getMinGovActionDeposit
@@ -27,6 +27,7 @@ module Testnet.Components.Query
   , waitUntilEpoch
   , waitForBlocks
   , retryUntilJustM
+  , retryUntilM
 
   , findAllUtxos
   , findUtxosWithAddress
@@ -59,11 +60,12 @@ import qualified Cardano.Ledger.State as L
 
 import           Prelude
 
-import           Control.Exception.Safe (MonadCatch)
+import           Control.Applicative ((<|>))
+import           Control.Concurrent.STM (STM, TVar, modifyTVar', newTVarIO, readTVar, writeTVar)
+import qualified Control.Concurrent.STM as STM
 import           Control.Monad
+import           Control.Monad.Trans.Maybe (MaybeT (..), mapMaybeT, runMaybeT)
 import           Control.Monad.Trans.Resource
-import           Control.Monad.Trans.State.Strict (put)
-import           Data.IORef
 import           Data.List (sortOn)
 import qualified Data.Map as Map
 import           Data.Map.Strict (Map)
@@ -87,6 +89,8 @@ import           Hedgehog
 import qualified Hedgehog as H
 import           Hedgehog.Extras (MonadAssertion)
 import qualified Hedgehog.Extras as H
+
+import           UnliftIO.STM (atomically, readTVarIO, registerDelay)
 
 -- | Block and wait for the desired epoch.
 waitUntilEpoch
@@ -122,7 +126,7 @@ waitForEpochs
   -> EpochInterval  -- ^ Number of epochs to wait
   -> m EpochNo -- ^ The epoch number reached
 waitForEpochs epochStateView interval = withFrozenCallStack $ do
-  void $ watchEpochStateUpdate epochStateView interval $ \_ -> pure Nothing
+  void . retryUntilRightM epochStateView (WaitForEpochs interval) . pure $ Left ()
   getCurrentEpochNo epochStateView
 
 -- | Wait for the requested number of blocks
@@ -131,7 +135,6 @@ waitForBlocks
   => MonadIO m
   => MonadTest m
   => MonadAssertion m
-  => MonadCatch m
   => EpochStateView
   -> Word64 -- ^ Number of blocks to wait
   -> m BlockNo -- ^ The block number reached
@@ -139,12 +142,8 @@ waitForBlocks epochStateView numberOfBlocks = withFrozenCallStack $ do
   BlockNo startingBlockNumber <- getBlockNumber epochStateView
   H.note_ $ "Current block number: " <> show startingBlockNumber <> ". "
     <> "Waiting for " <> show numberOfBlocks <> " blocks"
-  H.noteShowM . H.nothingFailM . fmap (fmap BlockNo) $
-    watchEpochStateUpdate epochStateView (EpochInterval maxBound) $ \(_, _, BlockNo blockNumber) ->
-      pure $
-        if blockNumber >= startingBlockNumber + numberOfBlocks
-        then Just blockNumber
-        else Nothing
+  void . retryUntilRightM epochStateView (WaitForBlocks numberOfBlocks) . pure $ Left ()
+  getBlockNumber epochStateView
 
 data TestnetWaitPeriod
   = WaitForEpochs EpochInterval
@@ -158,6 +157,41 @@ instance Show TestnetWaitPeriod where
     WaitForBlocks n -> "WaitForBlocks " <> show n
     WaitForSlots n -> "WaitForSlots " <> show n
 
+-- | Core retry loop. Returns early on 'Right'; on 'Left', blocks via STM until
+-- the 'EpochStateView' is updated (with a safety fallback timeout) and retries.
+-- Gives up and returns the last 'Left' once the 'TestnetWaitPeriod' deadline is
+-- exceeded.
+retryUntilRightM
+  :: HasCallStack
+  => MonadIO m
+  => MonadTest m
+  => MonadAssertion m
+  => EpochStateView
+  -> TestnetWaitPeriod
+  -> m (Either e a)
+  -> m (Either e a)
+retryUntilRightM esv timeout act = withFrozenCallStack $ do
+  startingValue <- getCurrentValue
+  go $ startingValue + timeoutW64
+  where
+    go deadline = do
+      -- Sample the version before running 'act' so that any update landing during 'act'
+      -- makes 'awaitStateUpdateTimeout' return without blocking, rather than waiting for
+      -- the next update and adding a block/epoch of latency.
+      versionBeforeAct <- readTVarIO $ epochStateVersion esv
+      act >>= \case
+        r@(Right _) -> pure r
+        l@(Left _) -> do
+          cv <- getCurrentValue
+          if cv > deadline
+            then pure l
+            else awaitStateUpdateTimeout esv 300 versionBeforeAct *> go deadline
+
+    (getCurrentValue, timeoutW64) = case timeout of
+      WaitForEpochs (EpochInterval n) -> (unEpochNo <$> getCurrentEpochNo esv, fromIntegral n)
+      WaitForSlots n                  -> (unSlotNo <$> getSlotNumber esv, n)
+      WaitForBlocks n                 -> (unBlockNo <$> getBlockNumber esv, n)
+
 -- | Retries the action until it returns 'Just' or the timeout is reached
 retryUntilJustM
   :: HasCallStack
@@ -168,32 +202,41 @@ retryUntilJustM
   -> TestnetWaitPeriod -- ^ timeout for an operation
   -> m (Maybe a)
   -> m a
-retryUntilJustM esv timeout act = withFrozenCallStack $ do
-  startingValue <- getCurrentValue
-  go startingValue
-  where
-    go startingValue = withFrozenCallStack $ do
-      cv <- getCurrentValue
-      when (timeoutW64 + startingValue < cv) $ do
-        H.note_ $ "Action did not result in 'Just' - waited for: " <> show timeout
-        H.failure
-      act >>= \case
-        Just a -> pure a
-        Nothing -> do
-          H.threadDelay 300_000
-          go startingValue
+retryUntilJustM esv timeout act = withFrozenCallStack $
+  retryUntilRightM esv timeout (maybe (Left ()) Right <$> act) >>= \case
+    Right a -> pure a
+    Left () -> do
+      H.note_ $ "Action did not result in 'Just' - waited for: " <> show timeout
+      H.failure
 
-    getCurrentValue = withFrozenCallStack $
-      case timeout of
-        WaitForEpochs _ -> unEpochNo <$> getCurrentEpochNo esv
-        WaitForSlots _ -> unSlotNo <$> getSlotNumber esv
-        WaitForBlocks _ -> unBlockNo <$> getBlockNumber esv
+-- | Like 'retryUntilJustM' but takes a plain action and a predicate instead of
+-- an action returning 'Maybe'. On timeout, annotates the last value that failed
+-- the predicate. Intermediate attempts produce no annotations.
+retryUntilM
+  :: HasCallStack
+  => MonadIO m
+  => MonadTest m
+  => MonadAssertion m
+  => Show a
+  => EpochStateView
+  -> TestnetWaitPeriod -- ^ timeout
+  -> m a              -- ^ action to retry
+  -> (a -> Bool)      -- ^ predicate that must hold
+  -> m a
+retryUntilM esv timeout act predicate = withFrozenCallStack $
+  retryUntilRightM esv timeout ((\r -> if predicate r then Right r else Left r) <$> act) >>= \case
+    Right a -> pure a
+    Left r -> do
+      H.noteShow_ r
+      H.note_ $ "Predicate not satisfied after: " <> show timeout
+      H.failure
 
-    timeoutW64 =
-      case timeout of
-        WaitForEpochs (EpochInterval n) -> fromIntegral n
-        WaitForSlots n -> n
-        WaitForBlocks n -> n
+-- | Status of the 'EpochStateView' background thread when epoch state is not yet available
+data EpochStateStatus
+  = EpochStateNotInitialised
+  -- ^ The background thread has not yet received any epoch state from the node
+  | EpochStateFoldError !FoldBlocksError
+  -- ^ The background thread encountered an error while folding blocks
 
 -- | Status of the 'EpochStateView' background thread when epoch state is not yet available
 data EpochStateStatus
@@ -204,15 +247,55 @@ data EpochStateStatus
 
 -- | A read-only mutable pointer to an epoch state, updated automatically
 data EpochStateView = EpochStateView
-  { nodeConfigPath :: !(NodeConfigFile In)
-  -- ^ node configuration file path
-  , socketPath :: !SocketPath
-  -- ^ node socket path, to which foldEpochState is connected to
-  , epochStateView :: !(IORef (Either EpochStateStatus (AnyNewEpochState, SlotNo, BlockNo)))
+  { epochStateView :: !(TVar (Either EpochStateStatus (AnyNewEpochState, SlotNo, BlockNo)))
   -- ^ Automatically updated current NewEpochState. 'Left' indicates the state is not yet available
   -- (either not initialised or an error occurred). 'Right' contains the latest epoch state.
   -- Use 'getEpochState', 'getBlockNumber', 'getSlotNumber' to access the values.
+  , epochStateVersion :: !(TVar Word64)
+  -- ^ Monotonically increasing counter, bumped on every state write.
+  -- Used by 'awaitStateUpdateTimeout' to block until the next update.
   }
+
+-- | Write a new value to the epoch state and bump the version counter atomically.
+writeEpochStateView
+  :: EpochStateView
+  -> Either EpochStateStatus (AnyNewEpochState, SlotNo, BlockNo)
+  -- ^ new state value
+  -> STM ()
+writeEpochStateView EpochStateView{epochStateView, epochStateVersion} newState = do
+  writeTVar epochStateView newState
+  modifyTVar' epochStateVersion (+ 1)
+
+-- | Block until the epoch state version advances past the provided previously sampled
+-- version, or until the fallback timeout expires. Returns immediately if the current
+-- version already differs, so callers can sample before running an action and avoid
+-- missing updates that land during the action. Returns 'Nothing' on timeout.
+-- All threads blocked on the same 'EpochStateView' wake up on each update.
+awaitStateUpdateTimeout
+  :: MonadIO m
+  => EpochStateView
+  -> DTC.NominalDiffTime -- ^ Fallback timeout
+  -> Word64 -- ^ Previously sampled version
+  -> m (Maybe (Either EpochStateStatus (AnyNewEpochState, SlotNo, BlockNo)))
+awaitStateUpdateTimeout EpochStateView{epochStateVersion, epochStateView} timeout sinceVersion = runMaybeT $ fastResult <|> awaitedResult
+  where
+    -- Fast path: if the version already differs, read state and version atomically and return
+    -- without allocating a 'registerDelay' timer. This avoids accumulating timer-queue entries
+    -- when callers sample a stale version and an update has already landed.
+    fastResult = mapMaybeT atomically $ do
+      v <- lift $ readTVar epochStateVersion
+      guard $ v /= sinceVersion
+      lift $ readTVar epochStateView
+
+    awaitedResult = MaybeT $ do
+      timedOutVar <- registerDelay . ceiling $ timeout * 1_000_000
+      atomically $ do
+        v <- readTVar epochStateVersion
+        timedOut <- readTVar timedOutVar
+        case (v /= sinceVersion, timedOut) of
+          (True, _) -> Just <$> readTVar epochStateView
+          (_, True) -> pure Nothing
+          _ -> STM.retry
 
 -- | Get epoch state from the view. If the state isn't available, retry waiting up to 25 seconds. Fails
 -- immediately if the background thread encountered an error, or after 25 seconds if not yet initialised.
@@ -246,9 +329,9 @@ getSlotNumber
 getSlotNumber epochStateView =
   withFrozenCallStack $ (\(_, slotNumber, _) -> slotNumber) <$> getEpochStateDetails epochStateView
 
--- | Utility function for accessing epoch state in 'IORef'.
--- Retries every 0.5s for up to 25 seconds while not initialised.
--- Fails immediately if the background fold thread encountered an error.
+-- | Access the current epoch state. Returns immediately if state is already available.
+-- Blocks up to 25 seconds waiting for initialisation if the background thread has not yet
+-- received any epoch state. Fails immediately if the background thread encountered an error.
 getEpochStateDetails
   :: HasCallStack
   => MonadAssertion m
@@ -256,27 +339,46 @@ getEpochStateDetails
   => MonadIO m
   => EpochStateView
   -> m (AnyNewEpochState, SlotNo, BlockNo)
-getEpochStateDetails EpochStateView{epochStateView} =
-  withFrozenCallStack $ do
-    deadline <- liftIO $ DTC.addUTCTime 25 <$> DTC.getCurrentTime
-    go deadline
+getEpochStateDetails EpochStateView{epochStateView} = withFrozenCallStack $
+  -- Fast path: read the TVar outside STM block so we don't register a pointless
+  -- 'initTimeoutSeconds' timer on every call. These getters run inside tight
+  -- retry loops, and the unused timer-queue entries would otherwise accumulate.
+  readTVarIO epochStateView
+    >>= awaitForState
+    >>= failEpochStateFoldError
   where
-    go deadline = do
-      result <- H.evalIO $ readIORef epochStateView
-      case result of
-        Left (EpochStateFoldError err) -> do
-          H.note_ $ "EpochStateView background thread failed: " <> docToString (prettyError err)
-          H.failure
-        Left EpochStateNotInitialised -> do
-          currentTime <- liftIO DTC.getCurrentTime
-          if currentTime < deadline
-            then do
-              H.threadDelay 500_000
-              go deadline
-            else do
-              H.note_ "EpochStateView has not been initialised within 25 seconds"
-              H.failure
-        Right details -> pure details
+    initTimeoutSeconds :: Int
+    initTimeoutSeconds = 25
+
+    awaitForState
+      :: MonadIO n
+      => Either EpochStateStatus (AnyNewEpochState, SlotNo, BlockNo)
+      -> n (Either EpochStateStatus (AnyNewEpochState, SlotNo, BlockNo))
+    awaitForState = \case
+      Left EpochStateNotInitialised -> do
+        -- register delay only when we're starting to retry
+        timedOutVar <- registerDelay $ initTimeoutSeconds * 1_000_000
+        atomically $ do
+          state' <- readTVar epochStateView
+          state' <$ case state' of
+              -- retry until timeout
+              Left EpochStateNotInitialised -> readTVar timedOutVar >>= guard
+              _ -> pure ()
+      state -> pure state
+
+    failEpochStateFoldError
+      :: (HasCallStack, MonadTest n)
+      => Either EpochStateStatus (AnyNewEpochState, SlotNo, BlockNo)
+      -> n (AnyNewEpochState, SlotNo, BlockNo)
+    failEpochStateFoldError = \case
+      Right details -> pure details
+      Left (EpochStateFoldError err) -> do
+        H.note_ $ "EpochStateView background thread failed: " <> docToString (prettyError err)
+        H.failure
+      Left EpochStateNotInitialised -> do
+        H.note_ $ "EpochStateView has not been initialised within " <> show initTimeoutSeconds <> " seconds"
+        H.failure
+
 
 -- | Create a background thread listening for new epoch states. New epoch states are available to access
 -- through 'EpochStateView', using query functions.
@@ -291,43 +393,16 @@ getEpochStateView
   -> SocketPath -- ^ node socket path
   -> m EpochStateView
 getEpochStateView nodeConfigFile socketPath = withFrozenCallStack $ do
-  epochStateView <- H.evalIO $ newIORef $ Left EpochStateNotInitialised
-  void . asyncRegister_ $ do
+  esv <- H.evalIO $ EpochStateView <$> newTVarIO (Left EpochStateNotInitialised) <*> newTVarIO 0
+  _ <- asyncRegister_ $ do
     result <- runExceptT $ foldEpochState nodeConfigFile socketPath QuickValidation (EpochNo maxBound) ()
       $ \epochState slotNumber blockNumber -> do
-          liftIOAnnotated . writeIORef epochStateView $ Right (epochState, slotNumber, blockNumber)
+          liftIOAnnotated . atomically $ writeEpochStateView esv $ Right (epochState, slotNumber, blockNumber)
           pure ConditionNotMet
     case result of
-      Left err -> writeIORef epochStateView $ Left $ EpochStateFoldError err
+      Left err -> atomically $ writeEpochStateView esv $ Left $ EpochStateFoldError err
       Right _ -> pure ()
-  pure $ EpochStateView nodeConfigFile socketPath epochStateView
-
--- | Watch the epoch state view until the guard function returns 'Just' or the timeout epoch is reached.
--- Executes the guard function every 300ms. Waits for at most @maxWait@ epochs.
--- The function will return the result of the guard function if it is met within the number of epochs,
--- otherwise it will return @Nothing@.
-watchEpochStateUpdate
-  :: forall m a. (HasCallStack, MonadIO m, MonadTest m, MonadAssertion m)
-  => EpochStateView -- ^ The info to access the epoch state
-  -> EpochInterval -- ^ The maximum number of epochs to wait
-  -> ((AnyNewEpochState, SlotNo, BlockNo) -> m (Maybe a)) -- ^ The guard function (@Just@ if the condition is met, @Nothing@ otherwise)
-  -> m (Maybe a)
-watchEpochStateUpdate epochStateView (EpochInterval maxWait) f  = withFrozenCallStack $ do
-  AnyNewEpochState _ newEpochState _ <- getEpochState epochStateView
-  let EpochNo currentEpoch = L.nesEL newEpochState
-  go $ currentEpoch + fromIntegral maxWait
-    where
-      go :: Word64 -> m (Maybe a)
-      go timeout = do
-        newEpochStateDetails@(AnyNewEpochState _ newEpochState' _, _, _) <- getEpochStateDetails epochStateView
-        let EpochNo currentEpoch = L.nesEL newEpochState'
-        f newEpochStateDetails >>= \case
-          Just result -> pure (Just result)
-          Nothing
-            | currentEpoch > timeout -> pure Nothing
-            | otherwise ->  do
-              H.threadDelay 300_000
-              go timeout
+  pure esv
 
 -- | Retrieve all UTxOs map from the epoch state view.
 findAllUtxos
@@ -461,42 +536,18 @@ checkDRepState
       -> Maybe a) -- ^ A function that checks whether the DRep state is correct or up to date
                   -- and potentially inspects it.
   -> m a
-checkDRepState epochStateView@EpochStateView{nodeConfigPath, socketPath} sbe f = withFrozenCallStack $ do
-  currentEpoch <- getCurrentEpochNo epochStateView
-  let terminationEpoch = succ . succ $ currentEpoch
-  result <- H.evalIO . runExceptT $ foldEpochState nodeConfigPath socketPath QuickValidation terminationEpoch Nothing
-      $ \(AnyNewEpochState actualEra newEpochState _) _slotNumber _blockNumber -> do
-        Refl <- either error pure $ assertErasEqual sbe actualEra
-        let dreps =
-              shelleyBasedEraConstraints sbe
-                $ SQ.queryDRepState newEpochState Set.empty
-        case f dreps of
-          Nothing -> pure ConditionNotMet
-          Just a -> do put $ Just a
-                       pure ConditionMet
-  case result of
-    Left (FoldBlocksApplyBlockError (TerminationEpochReached epochNo)) -> do
-      H.note_ $ unlines
-                  [ "checkDRepState: condition not met before termination epoch: " <> show epochNo
-                  , "This is likely an error of this test." ]
+checkDRepState epochStateView sbe f = withFrozenCallStack $
+  retryUntilRightM epochStateView (WaitForEpochs $ EpochInterval 2) action >>= \case
+    Right a -> pure a
+    Left () -> do
+      H.note_ "checkDRepState: condition not met within 2 epochs. This is likely a test error."
       H.failure
-    Left err -> do
-      H.note_ $ unlines
-                  [ "checkDRepState: could not reach termination epoch: " <> docToString (prettyError err)
-                  , "This is probably an error unrelated to this test." ]
-      H.failure
-    Right (_, Nothing) -> do
-      H.note_ $ unlines
-                  [ "checkDRepState: foldEpochState returned Nothing: "
-                  , "This is probably an error related to foldEpochState." ]
-      H.failure
-    Right (ConditionNotMet, Just _) -> do
-      H.note_ $ unlines
-                  [ "checkDRepState: foldEpochState returned Just and ConditionNotMet: "
-                  , "This is probably an error related to foldEpochState." ]
-      H.failure
-    Right (ConditionMet, Just val) ->
-      return val
+  where
+    action = do
+      AnyNewEpochState actualEra newEpochState _ <- getEpochState epochStateView
+      Refl <- H.leftFail $ assertErasEqual sbe actualEra
+      pure . maybe (Left ()) Right . f $ shelleyBasedEraConstraints sbe
+        $ SQ.queryDRepState newEpochState Set.empty
 
 -- | Obtain governance state from node (CLI query)
 getGovState
@@ -583,30 +634,21 @@ assertNewEpochState
   -- ^ The lens to access the specific value in the epoch state.
   -> value -- ^ The expected value to check in the epoch state.
   -> m ()
-assertNewEpochState epochStateView sbe maxWait lens expected = withFrozenCallStack $ do
-  mStateView <- watchEpochStateUpdate epochStateView maxWait (const checkEpochState)
-  when (isNothing mStateView) $ do
-    val <- getFromEpochStateForEra
-    -- there's a tiny tiny chance that the value has changed since 'watchEpochStateUpdate'
-    -- so check it again
-    if val == expected
-    then pure ()
-    else H.failMessage callStack $ unlines
-           [ "assertNewEpochState: expected value not reached within the time frame."
-           , "Expected value: " <> show expected
-           , "Actual value: " <> show val
-           ]
+assertNewEpochState epochStateView sbe maxWait lens expected = withFrozenCallStack $
+  retryUntilRightM epochStateView (WaitForEpochs maxWait) checkEpochState >>= \case
+    Right () -> pure ()
+    Left actual -> do
+      H.note_ $ unlines
+        [ "assertNewEpochState: expected value not reached within " <> show maxWait
+        , "Expected: " <> show expected
+        , "Actual:   " <> show actual
+        ]
+      H.failure
   where
-    checkEpochState
-      :: HasCallStack
-      => m (Maybe ())
     checkEpochState = withFrozenCallStack $ do
       val <- getFromEpochStateForEra
-      pure $ if val == expected then Just () else Nothing
+      pure $ if val == expected then Right () else Left val
 
-    getFromEpochStateForEra
-      :: HasCallStack
-      => m value
     getFromEpochStateForEra = withFrozenCallStack $ do
       (AnyNewEpochState actualEra newEpochState _, _, _) <- getEpochStateDetails epochStateView
       Refl <- H.leftFail $ assertErasEqual sbe actualEra

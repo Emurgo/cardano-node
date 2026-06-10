@@ -70,7 +70,7 @@
   } @ input: let
     inherit (builtins) elem match;
     inherit (nixpkgs) lib;
-    inherit (lib) collect getAttr genAttrs filterAttrs hasPrefix head isDerivation mapAttrs optionalAttrs optionals recursiveUpdate ;
+    inherit (lib) collect getAttr genAttrs filterAttrs hasPrefix head isDerivation mapAttrs optionalAttrs optionals recursiveUpdate;
     inherit (utils.lib) eachSystem flattenTree;
     inherit (iohkNix.lib) prefixNamesWith;
     removeRecurse = lib.filterAttrsRecursive (n: _: n != "recurseForDerivations");
@@ -111,9 +111,10 @@
       (final: prev: {
         # For musl builds, make sure the static `liburing.a` file is not deleted in `postInstall`
         # ex: https://github.com/NixOS/nixpkgs/blob/f84a9816b2d5f7caade4b2fab16a66486abb7038/pkgs/by-name/li/liburing/package.nix#L43-L45
-        liburing = prev.liburing.overrideAttrs (attrs: final.lib.optionalAttrs final.stdenv.hostPlatform.isMusl {
-          postInstall = builtins.replaceStrings [ "rm $out/lib/liburing*.a" ] [ "" ] attrs.postInstall;
-        });
+        liburing = prev.liburing.overrideAttrs (attrs:
+          final.lib.optionalAttrs final.stdenv.hostPlatform.isMusl {
+            postInstall = builtins.replaceStrings ["rm $out/lib/liburing*.a"] [""] attrs.postInstall;
+          });
       })
       (import ./nix/pkgs.nix)
       self.overlay
@@ -124,42 +125,44 @@
     in
       # Take all executables from the project local packages
       project.exes
-      // (with project.hsPkgs; {
-        # Add some executables from other relevant packages
-        inherit (bech32.components.exes) bech32;
-        inherit (dmq-node.components.exes) dmq-node;
-        inherit (ouroboros-consensus.components.exes) db-analyser db-synthesizer db-truncater snapshot-converter;
-        inherit (kes-agent.components.exes) kes-agent kes-agent-control;
-        # Add cardano-node, cardano-cli and tx-generator with their git revision stamp.
-        # Keep available an alternative without the git revision, like the other
-        # passthru (profiled and asserted in nix/haskell.nix) that
-        # have no git revision but for the same compilation alternative.
-        cardano-node =
-          let node = project.exes.cardano-node;
-          in recursiveUpdate
-               (set-git-rev node)
-               {passthru = {noGitRev = node;};}
-        ;
-        cardano-cli =
-          let cli = cardano-cli.components.exes.cardano-cli;
-          in recursiveUpdate
-               (set-git-rev cli)
-               {passthru = {noGitRev = cli;};}
-        ;
-        cardano-submit-api =
-          let submit-api = project.exes.cardano-submit-api;
-          in recursiveUpdate
-               (set-git-rev submit-api)
-               {passthru = {noGitRev = submit-api;};}
-        ;
-      } // optionalAttrs (project.exes ? tx-generator) {
-        tx-generator =
-          let tx-gen = project.exes.tx-generator;
-          in recursiveUpdate
-               (set-git-rev tx-gen)
-               {passthru = {noGitRev = tx-gen;};}
-        ;
-      });
+      // (with project.hsPkgs;
+        {
+          # Add some executables from other relevant packages
+          inherit (bech32.components.exes) bech32;
+          inherit (dmq-node.components.exes) dmq-node;
+          inherit (ouroboros-consensus.components.exes) db-analyser db-synthesizer db-truncater snapshot-converter;
+          inherit (kes-agent.components.exes) kes-agent kes-agent-control;
+          # Add cardano-node, cardano-cli and tx-generator with their git revision stamp.
+          # Keep available an alternative without the git revision, like the other
+          # passthru (profiled and asserted in nix/haskell.nix) that
+          # have no git revision but for the same compilation alternative.
+          cardano-node = let
+            node = project.exes.cardano-node;
+          in
+            recursiveUpdate
+            (set-git-rev node)
+            {passthru = {noGitRev = node;};};
+          cardano-cli = let
+            cli = cardano-cli.components.exes.cardano-cli;
+          in
+            recursiveUpdate
+            (set-git-rev cli)
+            {passthru = {noGitRev = cli;};};
+          cardano-submit-api = let
+            submit-api = project.exes.cardano-submit-api;
+          in
+            recursiveUpdate
+            (set-git-rev submit-api)
+            {passthru = {noGitRev = submit-api;};};
+        }
+        // optionalAttrs (project.exes ? tx-generator) {
+          tx-generator = let
+            tx-gen = project.exes.tx-generator;
+          in
+            recursiveUpdate
+            (set-git-rev tx-gen)
+            {passthru = {noGitRev = tx-gen;};};
+        });
 
     mkCardanoNodePackages = project:
       (collectExes project)
@@ -374,7 +377,7 @@
           # Once building, windowsProject candidate for win-arm64 is project.projectCross.ucrtAarch64.
           // optionalAttrs (elem system ["x86_64-linux"]) {
             windows = let
-              windowsProject = (project.appendModule { compiler-nix-name = windowsCompilerNixName; }).projectCross.mingwW64;
+              windowsProject = (project.appendModule {compiler-nix-name = windowsCompilerNixName;}).projectCross.ucrt64;
               projectExes = collectExes windowsProject;
             in
               projectExes
@@ -507,7 +510,8 @@
             customConfig.haskellNix
           ];
         cardanoNodePackages = mkCardanoNodePackages final.cardanoNodeProject;
-        inherit (final.cardanoNodePackages)
+        inherit
+          (final.cardanoNodePackages)
           bech32
           cardano-cli
           cardano-node
@@ -519,7 +523,8 @@
           dmq-node
           locli
           snapshot-converter
-          tx-generator;
+          tx-generator
+          ;
       };
       nixosModules = {
         cardano-node = {

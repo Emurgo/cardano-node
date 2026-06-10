@@ -1,7 +1,7 @@
 cabal-version: 3.0
 
 name:                   cardano-testnet
-version:                10.2.0
+version:                11.0.0
 synopsis:               The cardano full node
 description:            The cardano full node.
 copyright:              2021-2023 Input Output Global Inc (IOG), 2023-2026 Intersect.
@@ -41,8 +41,8 @@ library
                       , annotated-exception
                       , ansi-terminal
                       , bytestring
-                      , cardano-api ^>= 10.26
-                      , cardano-cli:{cardano-cli, cardano-cli-test-lib} ^>= 10.16
+                      , cardano-api ^>= 11.0
+                      , cardano-cli:{cardano-cli, cardano-cli-test-lib} ^>= 11.0
                       , cardano-crypto-class ^>=2.3
                       , cardano-crypto-wrapper
                       , cardano-git-rev ^>= 0.2.2
@@ -84,6 +84,7 @@ library
                       , network
                       , network-mux
                       , optparse-applicative-fork
+                      , parsec
                       , ouroboros-network:{api, framework, ouroboros-network} ^>= 1.1
                       , cardano-diffusion:{api, cardano-diffusion} ^>= 1.0
                       , prettyprinter
@@ -135,7 +136,8 @@ library
                         Testnet.TestQueryCmds
                         Testnet.Types
 
-  other-modules:        Parsers.Cardano
+  exposed-modules:      Parsers.Cardano
+  other-modules:
                         Parsers.Help
                         Parsers.Version
                         Testnet.TestEnumGenerator
@@ -218,6 +220,7 @@ test-suite cardano-testnet-test
                         Cardano.Testnet.Test.Cli.Transaction
                         Cardano.Testnet.Test.Cli.Transaction.BuildEstimate
                         Cardano.Testnet.Test.Cli.Transaction.RegisterDeregisterStakeAddress
+                        Cardano.Testnet.Test.Cli.Transaction.WithdrawalReward
                         Cardano.Testnet.Test.DumpConfig
                         Cardano.Testnet.Test.FoldEpochState
                         Cardano.Testnet.Test.Gov.CommitteeAddNew
@@ -239,6 +242,7 @@ test-suite cardano-testnet-test
                         Cardano.Testnet.Test.Rpc.Transaction
                         Cardano.Testnet.Test.Misc
                         Cardano.Testnet.Test.Node.Shutdown
+                        Cardano.Testnet.Test.Parser
                         Cardano.Testnet.Test.MainnetParams
                         Cardano.Testnet.Test.SanityCheck
                         Cardano.Testnet.Test.RunTestnet
@@ -286,6 +290,7 @@ test-suite cardano-testnet-test
                       , regex-compat
                       , rio
                       , tasty ^>= 1.5
+                      , tasty-hedgehog
                       , text
                       , time
                       , transformers

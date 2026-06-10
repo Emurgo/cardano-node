@@ -9,12 +9,17 @@ import qualified Cardano.Testnet.Test.Api.TxReferenceInputDatum
 import qualified Cardano.Testnet.Test.Cli.KesPeriodInfo
 import qualified Cardano.Testnet.Test.Cli.Plutus.BuildRaw
 import qualified Cardano.Testnet.Test.Cli.Plutus.CostCalculation
+import qualified Cardano.Testnet.Test.Cli.Plutus.MultiAssetReturnCollateral
 import qualified Cardano.Testnet.Test.Cli.Plutus.Scripts
 import qualified Cardano.Testnet.Test.Cli.Query
 import qualified Cardano.Testnet.Test.Cli.QuerySlotNumber
+import qualified Cardano.Testnet.Test.Cli.Scripts.Simple.CostCalculation
+import qualified Cardano.Testnet.Test.Cli.Scripts.Simple.Mint
 import qualified Cardano.Testnet.Test.Cli.StakeSnapshot
 import qualified Cardano.Testnet.Test.Cli.Transaction
+import qualified Cardano.Testnet.Test.Cli.Transaction.BuildEstimate
 import qualified Cardano.Testnet.Test.Cli.Transaction.RegisterDeregisterStakeAddress
+import qualified Cardano.Testnet.Test.Cli.Transaction.WithdrawalReward
 import qualified Cardano.Testnet.Test.DumpConfig
 import qualified Cardano.Testnet.Test.FoldEpochState
 import qualified Cardano.Testnet.Test.Gov.CommitteeAddNew as Gov
@@ -30,6 +35,7 @@ import qualified Cardano.Testnet.Test.Gov.TreasuryDonation as Gov
 import qualified Cardano.Testnet.Test.Gov.TreasuryWithdrawal as Gov
 import qualified Cardano.Testnet.Test.MainnetParams
 import qualified Cardano.Testnet.Test.Node.Shutdown
+import qualified Cardano.Testnet.Test.Parser
 import qualified Cardano.Testnet.Test.Rpc.Query
 import qualified Cardano.Testnet.Test.Rpc.Transaction
 import qualified Cardano.Testnet.Test.RunTestnet
@@ -37,12 +43,10 @@ import qualified Cardano.Testnet.Test.SanityCheck
 import qualified Cardano.Testnet.Test.SanityCheck as LedgerEvents
 import qualified Cardano.Testnet.Test.SubmitApi.Transaction
 import qualified Cardano.Testnet.Test.UpdateTimeStamps
-import qualified Cardano.Testnet.Test.Cli.Scripts.Simple.CostCalculation
-import qualified Cardano.Testnet.Test.Cli.Transaction.BuildEstimate
-import qualified Cardano.Testnet.Test.Cli.Plutus.MultiAssetReturnCollateral 
 
 import           Prelude
 
+import           Data.String (fromString)
 import qualified System.Environment as E
 import           System.IO (BufferMode (LineBuffering), hSetBuffering, hSetEncoding, stdout, utf8)
 
@@ -50,6 +54,7 @@ import           Testnet.Property.Run (ignoreOnMacAndWindows, ignoreOnWindows)
 
 import qualified Test.Tasty as T
 import           Test.Tasty (TestTree)
+import qualified Test.Tasty.Hedgehog as H
 
 -- import qualified Cardano.Testnet.Test.Cli.LeadershipSchedule
 -- import qualified Cardano.Testnet.Test.Gov.NoConfidence as Gov
@@ -89,7 +94,7 @@ tests = do
             , T.testGroup "Simple Script"
                 [ ignoreOnWindows "Simple Script Mint" Cardano.Testnet.Test.Cli.Scripts.Simple.Mint.hprop_simple_script_mint
                 , ignoreOnWindows "Simple Reference Script Mint" Cardano.Testnet.Test.Cli.Scripts.Simple.CostCalculation.hprop_ref_simple_script_mint
-                
+
                 ]
             , T.testGroup "Plutus"
                 [ ignoreOnWindows "PlutusV3 purposes" Cardano.Testnet.Test.Cli.Plutus.Scripts.hprop_plutus_purposes_v3
@@ -115,6 +120,8 @@ tests = do
           , ignoreOnWindows "simple transaction build" Cardano.Testnet.Test.Cli.Transaction.hprop_transaction
           , ignoreOnWindows "Transaction Build Estimate" Cardano.Testnet.Test.Cli.Transaction.BuildEstimate.hprop_tx_build_estimate
           , ignoreOnWindows "register deregister stake address in transaction build"  Cardano.Testnet.Test.Cli.Transaction.RegisterDeregisterStakeAddress.hprop_tx_register_deregister_stake_address
+          , ignoreOnWindows "transaction build with withdrawal" Cardano.Testnet.Test.Cli.Transaction.WithdrawalReward.hprop_tx_withdrawal_reward
+          , ignoreOnWindows "transaction build with plutus withdrawal" Cardano.Testnet.Test.Cli.Transaction.WithdrawalReward.hprop_tx_withdrawal_reward_plutus_v3
           -- FIXME
           -- , ignoreOnMacAndWindows "leadership-schedule" Cardano.Testnet.Test.Cli.LeadershipSchedule.hprop_leadershipSchedule
 
@@ -142,6 +149,18 @@ tests = do
     , T.testGroup "RPC"
         [ ignoreOnWindows "RPC Query Protocol Params" Cardano.Testnet.Test.Rpc.Query.hprop_rpc_query_pparams
         , ignoreOnWindows "RPC Transaction Submit" Cardano.Testnet.Test.Rpc.Transaction.hprop_rpc_transaction
+        ]
+    , T.testGroup "NodesWithOptions parser"
+        [ H.testPropertyNamed "Roundtrip" (fromString "prop_parseNodeSpecs_roundtrip")
+            Cardano.Testnet.Test.Parser.prop_parseNodeSpecs_roundtrip
+        , H.testPropertyNamed "Counts" (fromString "prop_parseNodeSpecs_counts")
+            Cardano.Testnet.Test.Parser.prop_parseNodeSpecs_counts
+        , H.testPropertyNamed "Relay before SPO rejected" (fromString "prop_relay_before_spo_rejected")
+            Cardano.Testnet.Test.Parser.prop_relay_before_spo_rejected
+        , H.testPropertyNamed "Valid mixed specs" (fromString "unit_valid_mixed_specs")
+            Cardano.Testnet.Test.Parser.unit_valid_mixed_specs
+        , H.testPropertyNamed "Quoted paths" (fromString "unit_quoted_paths")
+            Cardano.Testnet.Test.Parser.unit_quoted_paths
         ]
     ]
 

@@ -69,12 +69,15 @@ hprop_leadershipSchedule = integrationRetryWorkspace 2 "leadership-schedule" $ \
       sbe = convert ceo
       asbe = AnyShelleyBasedEra sbe
       cTestnetOptions = def
-        { cardanoNodeEra = asbe
-        , cardanoNodes =
-            SpoNodeOptions [] :|
-          [ SpoNodeOptions []
-          , SpoNodeOptions []
-          ]
+        { creationEra = asbe
+        , creationNodes =
+            TestnetNodesWithOptions
+              { optSpoNodes = NodeWithOptions Nothing [] :|
+                [ NodeWithOptions Nothing []
+                , NodeWithOptions Nothing []
+                ]
+              , optRelayNodes = []
+              }
         }
       eraString = eraToString sbe
 
@@ -154,7 +157,7 @@ hprop_leadershipSchedule = integrationRetryWorkspace 2 "leadership-schedule" $ \
   -- Test stake address registration cert
   createStakeKeyRegistrationCertificate
     tempAbsPath
-    (cardanoNodeEra cTestnetOptions)
+    (creationEra cTestnetOptions)
     (verificationKey testDelegatorKeys)
     keyDeposit
     testDelegatorRegCertFp
@@ -264,7 +267,7 @@ hprop_leadershipSchedule = integrationRetryWorkspace 2 "leadership-schedule" $ \
   H.lbsWriteFile (unFile configurationFile) jsonBS
   newNodePort <- H.randomPort testnetDefaultIpv4Address
   eRuntime <- runExceptT . retryOnAddressInUseError $
-    startNode (TmpAbsolutePath work) "test-spo" testnetDefaultIpv4Address newNodePort testnetMagic
+    startNode (TmpAbsolutePath work) "test-spo" testnetDefaultIpv4Address newNodePort testnetMagic Nothing
         [ "run"
         , "--config", unFile configurationFile
         , "--topology", topologyFile

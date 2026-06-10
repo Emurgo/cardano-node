@@ -51,8 +51,10 @@ hprop_tx_register_deregister_stake_address = integrationRetryWorkspace 2 "regist
   let ceo = ConwayEraOnwardsConway
       sbe = convert ceo
       eraName = eraToString sbe
-      fastTestnetOptions = def { cardanoNodeEra = AnyShelleyBasedEra sbe }
-      shelleyOptions = def { genesisEpochLength = 200 }
+      creationOptions = def
+        { creationEra = AnyShelleyBasedEra sbe
+        , creationGenesisOptions = def { genesisEpochLength = 200 }
+        }
 
   TestnetRuntime
     { testnetMagic
@@ -60,7 +62,7 @@ hprop_tx_register_deregister_stake_address = integrationRetryWorkspace 2 "regist
     , wallets=wallet0:wallet1:_
     , configurationFile
     }
-    <- createAndRunTestnet fastTestnetOptions shelleyOptions conf
+    <- createAndRunTestnet creationOptions def conf
 
   node <- H.headM testnetNodes
   poolSprocket1 <- H.noteShow $ nodeSprocket node
@@ -130,15 +132,10 @@ hprop_tx_register_deregister_stake_address = integrationRetryWorkspace 2 "regist
     ]
 
 
-  _ <- waitForBlocks epochStateView 1
-
   H.note_ "Check that stake address is registered"
-  getAccountsStates epochStateView sbe >>=
-    flip H.assertWith
-      (\accountsStates -> isJust $ do
-        _state <- M.lookup stakeKeyHash accountsStates
-        pure () -- TODO: should we check for balance?
-        )
+  void $ retryUntilM epochStateView (WaitForBlocks 5)
+    (getAccountsStates epochStateView sbe)
+    (M.member stakeKeyHash)
 
   -- deregister stake address
   createStakeKeyDeregistrationCertificate
@@ -174,10 +171,8 @@ hprop_tx_register_deregister_stake_address = integrationRetryWorkspace 2 "regist
     , "--tx-file", stakeCertDeregTxSignedFp
     ]
 
-  _ <- waitForBlocks epochStateView 1
-
   H.note_ "Check that stake address is deregistered"
-  getAccountsStates epochStateView sbe >>=
-    flip H.assertWith
-      (isNothing . M.lookup stakeKeyHash)
+  void $ retryUntilM epochStateView (WaitForBlocks 5)
+    (getAccountsStates epochStateView sbe)
+    (M.notMember stakeKeyHash)
 

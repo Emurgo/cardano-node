@@ -10,10 +10,13 @@ module Cardano.Testnet (
   retryOnAddressInUseError,
 
   -- ** Testnet options
-  CardanoTestnetOptions(..),
+  TestnetCreationOptions(..),
+  TestnetRuntimeOptions(..),
+  TestnetEnvOptions(..),
   RpcSupport(..),
-  NodeOption(..),
-  cardanoDefaultTestnetNodeOptions,
+  TestnetNodesWithOptions(..),
+  NodeWithOptions(..),
+  cardanoDefaultTestnetNodesWithOptions,
   getDefaultAlonzoGenesis,
   getDefaultShelleyGenesis,
 
@@ -29,6 +32,7 @@ module Cardano.Testnet (
 
   -- * EpochState processsing helper functions
   maybeExtractGovernanceActionIndex,
+  maybeExtractGovernanceActionExpiry,
 
   -- * Processes
   procChairman,

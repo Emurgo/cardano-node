@@ -11,7 +11,7 @@ module Cardano.Testnet.Test.Gov.CommitteeAddNew
   ) where
 
 import           Cardano.Api as Api
-import           Cardano.Api.Experimental (Some (..))
+import           Cardano.Api.Experimental (Some (..), obtainCommonConstraints)
 import qualified Cardano.Api.Ledger as L
 
 import qualified Cardano.Ledger.Conway.Governance as L
@@ -38,7 +38,7 @@ import           Test.Cardano.CLI.Hash (serveFilesWhile)
 import           Testnet.Components.Configuration
 import           Testnet.Components.Query
 import           Testnet.Defaults
-import           Testnet.EpochStateProcessing (waitForGovActionVotes)
+import           Testnet.EpochStateProcessing (unsafeEraFromSbe, waitForGovActionVotes)
 import qualified Testnet.Process.Cli.DRep as DRep
 import           Testnet.Process.Cli.Keys
 import qualified Testnet.Process.Cli.SPO as SPO
@@ -46,8 +46,8 @@ import           Testnet.Process.Cli.SPO (createStakeKeyRegistrationCertificate)
 import           Testnet.Process.Cli.Transaction (retrieveTransactionId, signTx, submitTx)
 import           Testnet.Process.Run (addEnvVarsToConfig, execCli', mkExecConfig)
 import           Testnet.Process.RunIO (liftIOAnnotated)
-import           Testnet.Property.Util (integrationWorkspace)
-import           Testnet.Start.Types (GenesisOptions (..), cardanoNumPools)
+import           Testnet.Property.Util (integrationRetryWorkspace)
+import           Testnet.Start.Types (GenesisOptions (..), creationNumPools)
 import           Testnet.Types
 
 import           Hedgehog
@@ -57,7 +57,7 @@ import qualified Hedgehog.Extras as H
 -- | Execute me with:
 -- @DISABLE_RETRIES=1 cabal test cardano-testnet-test --test-options '-p "/Committee Add New/"'@
 hprop_constitutional_committee_add_new :: Property
-hprop_constitutional_committee_add_new = integrationWorkspace "constitutional-committee-add-new" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
+hprop_constitutional_committee_add_new = integrationRetryWorkspace 2 "constitutional-committee-add-new" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   conf@Conf { tempAbsPath } <- mkConf tempAbsBasePath'
   let tempAbsPath' = unTmpAbsPath tempAbsPath
       tempBaseAbsPath = makeTmpBaseAbsPath tempAbsPath
@@ -73,17 +73,17 @@ hprop_constitutional_committee_add_new = integrationWorkspace "constitutional-co
               -> [(String, Int)] -- ^ [(vote, ordering number)]
       mkVotes votes = zip (concatMap (uncurry replicate) votes) [1..]
       nDrepVotes = length drepVotes
-      nSpos = fromIntegral $ cardanoNumPools fastTestnetOptions
+      nSpos = fromIntegral $ creationNumPools creationOptions
       ceo = ConwayEraOnwardsConway
       sbe = convert ceo
       era = toCardanoEra sbe
       cEra = AnyCardanoEra era
       eraName = eraToString era
-      fastTestnetOptions = def
-        { cardanoNodeEra = AnyShelleyBasedEra sbe
-        , cardanoNumDReps = fromIntegral nDrepVotes
+      creationOptions = def
+        { creationEra = AnyShelleyBasedEra sbe
+        , creationNumDReps = fromIntegral nDrepVotes
+        , creationGenesisOptions = def { genesisEpochLength = 200 }
         }
-      shelleyOptions = def { genesisEpochLength = 200 }
   H.annotateShow drepVotes
   H.noteShow_ nDrepVotes
 
@@ -92,7 +92,7 @@ hprop_constitutional_committee_add_new = integrationWorkspace "constitutional-co
     , wallets=wallet0:wallet1:_
     , configurationFile
     }
-    <- createAndRunTestnet fastTestnetOptions shelleyOptions conf
+    <- createAndRunTestnet creationOptions def conf
 
   node@TestnetNode{poolKeys=Just poolKeys} <- H.headM . filter isTestnetNodeSpo $ testnetNodes runtime
   poolSprocket1 <- H.noteShow $ nodeSprocket node
@@ -202,11 +202,11 @@ hprop_constitutional_committee_add_new = integrationWorkspace "constitutional-co
     , "--out-file", gov </> "stake-hash.addr"
     ]
 
-  stakeKeyHash <- H.readFile $ gov </> "stake-hash.addr" 
+  stakeKeyHash <- H.readFile $ gov </> "stake-hash.addr"
 
   H.note_ $ "Stake key hash:"  <> stakeKeyHash
 
-  
+
 
   -- Create temporary HTTP server with files required by the call to `cardano-cli`
   -- In this case, the server emulates an IPFS gateway
@@ -251,8 +251,8 @@ hprop_constitutional_committee_add_new = integrationWorkspace "constitutional-co
   governanceActionTxId <- H.noteShowM $ retrieveTransactionId execConfig signedProposalTx
 
   governanceActionIx <-
-    H.nothingFailM . watchEpochStateUpdate epochStateView (L.EpochInterval 1) $ \(anyNewEpochState, _, _) ->
-      pure $ maybeExtractGovernanceActionIndex governanceActionTxId anyNewEpochState
+    retryUntilJustM epochStateView (WaitForEpochs $ L.EpochInterval 1) $
+      maybeExtractGovernanceActionIndex governanceActionTxId <$> getEpochState epochStateView
 
   dRepVoteFiles <-
     DRep.generateVoteFiles
@@ -296,7 +296,8 @@ hprop_constitutional_committee_add_new = integrationWorkspace "constitutional-co
   length (filter ((== L.VoteYes) . snd) gaSpoVotes) === 1
   length spoVotes === length gaSpoVotes
 
-  H.nothingFailM $ watchEpochStateUpdate epochStateView (L.EpochInterval 1) (return . committeeIsPresent)
+  retryUntilJustM epochStateView (WaitForEpochs $ L.EpochInterval 1) $
+    committeeIsPresent <$> getEpochStateDetails epochStateView
 
   -- show proposed committee meembers
   H.noteShow_ ccCredentials
@@ -328,16 +329,12 @@ getCommitteeMembers epochStateView ceo = withFrozenCallStack $ do
 
 committeeIsPresent :: (AnyNewEpochState, SlotNo, BlockNo) -> Maybe ()
 committeeIsPresent (AnyNewEpochState sbe newEpochState _, _, _) =
-  caseShelleyToBabbageOrConwayEraOnwards
-    (const $ error "Constitutional committee does not exist pre-Conway era")
-    (\_ -> do
-      let mCommittee = newEpochState
-                       ^. L.nesEsL
-                       . L.esLStateL
-                       . L.lsUTxOStateL
-                       . L.utxosGovStateL
-                       . L.cgsCommitteeL
-      members <- L.committeeMembers <$> strictMaybeToMaybe mCommittee
-      when (Map.null members) Nothing
-    )
-    sbe
+  obtainCommonConstraints (unsafeEraFromSbe sbe) $ do
+    let mCommittee = newEpochState
+                     ^. L.nesEsL
+                     . L.esLStateL
+                     . L.lsUTxOStateL
+                     . L.utxosGovStateL
+                     . L.cgsCommitteeL
+    members <- L.committeeMembers <$> strictMaybeToMaybe mCommittee
+    guard (not $ Map.null members)

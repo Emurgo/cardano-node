@@ -14,6 +14,7 @@ module Cardano.Testnet.Test.Gov.TreasuryWithdrawal
   ) where
 
 import           Cardano.Api hiding (txId)
+import           Cardano.Api.Experimental (obtainCommonConstraints)
 import           Cardano.Api.Ledger (Credential, EpochInterval (EpochInterval), KeyRole (Staking))
 
 import qualified Cardano.Ledger.BaseTypes as L
@@ -39,6 +40,7 @@ import           System.FilePath ((</>))
 import           Test.Cardano.CLI.Hash (serveFilesWhile)
 import           Testnet.Components.Query
 import           Testnet.Defaults
+import           Testnet.EpochStateProcessing (unsafeEraFromSbe)
 import           Testnet.Process.Cli.Keys (cliStakeAddressKeyGen)
 import           Testnet.Process.Cli.SPO (createStakeKeyRegistrationCertificate)
 import           Testnet.Process.Cli.Transaction (retrieveTransactionId)
@@ -64,10 +66,12 @@ hprop_ledger_events_treasury_withdrawal = integrationRetryWorkspace 2  "treasury
       era = toCardanoEra sbe
       eraName = eraToString era
 
-      fastTestnetOptions = def { cardanoNodeEra = AnyShelleyBasedEra sbe }
-      shelleyOptions = def { genesisEpochLength = 200
-                           , genesisActiveSlotsCoeff = 0.3
-                           }
+      creationOptions = def
+        { creationEra = AnyShelleyBasedEra sbe
+        , creationGenesisOptions = def { genesisEpochLength = 200
+                                       , genesisActiveSlotsCoeff = 0.3
+                                       }
+        }
 
   TestnetRuntime
     { testnetMagic
@@ -75,7 +79,7 @@ hprop_ledger_events_treasury_withdrawal = integrationRetryWorkspace 2  "treasury
     , wallets=wallet0:wallet1:_
     , configurationFile
     }
-    <- createAndRunTestnet fastTestnetOptions shelleyOptions conf
+    <- createAndRunTestnet creationOptions def conf
 
   node@TestnetNode{nodeSprocket} <- H.headM testnetNodes
   poolSprocket1 <- H.noteShow nodeSprocket
@@ -268,10 +272,8 @@ getAnyWithdrawals
   -> m (Maybe (Map (Credential Staking) Coin))
 getAnyWithdrawals nodeConfigFile socketPath maxEpoch = withFrozenCallStack $ do
   fmap snd . H.leftFailM . evalIO . runExceptT $ foldEpochState nodeConfigFile socketPath FullValidation maxEpoch Nothing
-    $ \(AnyNewEpochState actualEra newEpochState _) ->
-      caseShelleyToBabbageOrConwayEraOnwards
-        (error $ "Expected Conway era onwards, got state in " <> docToString (pretty actualEra))
-        (\cEra _ _ -> conwayEraOnwardsConstraints cEra $ do
+    $ \(AnyNewEpochState actualEra newEpochState _) _ _ ->
+        obtainCommonConstraints (unsafeEraFromSbe actualEra) $ do
           let withdrawals = newEpochState
                 ^. L.newEpochStateGovStateL
                 . L.drepPulsingStateGovStateL
@@ -283,7 +285,6 @@ getAnyWithdrawals nodeConfigFile socketPath maxEpoch = withFrozenCallStack $ do
             else do
               put $ Just withdrawals
               pure ConditionMet
-        ) actualEra
 
 
 getTreasuryWithdrawalProposal
@@ -296,10 +297,8 @@ getTreasuryWithdrawalProposal
   -> m (Maybe L.GovActionId)
 getTreasuryWithdrawalProposal nodeConfigFile socketPath maxEpoch = withFrozenCallStack $ do
   fmap snd . H.leftFailM . evalIO . runExceptT $ foldEpochState nodeConfigFile socketPath QuickValidation maxEpoch Nothing
-      $ \(AnyNewEpochState actualEra newEpochState _) ->
-        caseShelleyToBabbageOrConwayEraOnwards
-          (error $ "Expected Conway era onwards, got state in " <> docToString (pretty actualEra))
-          (\cEra _ _ -> conwayEraOnwardsConstraints cEra $ do
+      $ \(AnyNewEpochState actualEra newEpochState _) _ _ ->
+          obtainCommonConstraints (unsafeEraFromSbe actualEra) $ do
             let proposals = newEpochState
                       ^. L.newEpochStateGovStateL
                       . L.cgsProposalsL
@@ -310,4 +309,3 @@ getTreasuryWithdrawalProposal nodeConfigFile socketPath maxEpoch = withFrozenCal
                 pure ConditionMet
               _ ->
                 pure ConditionNotMet
-          ) actualEra

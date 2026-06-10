@@ -62,8 +62,10 @@ hprop_ledger_events_info_action = integrationRetryWorkspace 2 "info-hash" $ \tem
       sbe = convert ceo
       asbe = AnyShelleyBasedEra sbe
       eraName = eraToString sbe
-      fastTestnetOptions = def { cardanoNodeEra = asbe }
-      shelleyOptions = def { genesisEpochLength = 200 }
+      creationOptions = def
+        { creationEra = asbe
+        , creationGenesisOptions = def { genesisEpochLength = 200 }
+        }
 
   TestnetRuntime
     { testnetMagic
@@ -71,7 +73,7 @@ hprop_ledger_events_info_action = integrationRetryWorkspace 2 "info-hash" $ \tem
     , wallets=wallet0:wallet1:_
     , configurationFile
     }
-    <- createAndRunTestnet fastTestnetOptions shelleyOptions conf
+    <- createAndRunTestnet creationOptions def conf
 
   node <- H.headM testnetNodes
   poolSprocket1 <- H.noteShow $ nodeSprocket node
@@ -191,8 +193,8 @@ hprop_ledger_events_info_action = integrationRetryWorkspace 2 "info-hash" $ \tem
   txId <- H.noteShowM $ retrieveTransactionId execConfig (File txbodySignedFp)
 
   governanceActionIndex <-
-    H.nothingFailM $ watchEpochStateUpdate epochStateView (EpochInterval 1) $ \(anyNewEpochState, _, _) ->
-      pure $ maybeExtractGovernanceActionIndex txId anyNewEpochState
+    retryUntilJustM epochStateView (WaitForEpochs $ EpochInterval 1)
+      $ maybeExtractGovernanceActionIndex txId <$> getEpochState epochStateView
 
   let voteFp :: Int -> FilePath
       voteFp n = work </> gov </> "vote-" <> show n

@@ -126,7 +126,7 @@ let
       # Start `supervisord` on the foreground.
       # Make sure it never runs in unbuffered mode:
       # https://docs.python.org/3/using/cmdline.html#envvar-PYTHONUNBUFFERED
-      PYTHONUNBUFFERED="" ${supervisor}/bin/supervisord --nodaemon --configuration "''${SUPERVISOR_CONF}" --loglevel="''${LOGLEVEL}"
+      PYTHONWARNINGS="ignore::UserWarning" PYTHONUNBUFFERED="" ${supervisor}/bin/supervisord --nodaemon --configuration "''${SUPERVISOR_CONF}" --loglevel="''${LOGLEVEL}"
       ''
   ;
 
@@ -523,6 +523,7 @@ let
             # Unable to locally verify the issuer's authority.
             # To connect to iog-cardano-perf.s3.eu-central-1.amazonaws.com insecurely, use `--no-check-certificate'.
             SSL_CERT_FILE = "${installables.cacert.nix-store-path}/etc/ssl/certs/ca-bundle.crt";
+            PYTHONWARNINGS="ignore::UserWarning";
           };
 
           # Sensible defaults.
@@ -1265,7 +1266,7 @@ let
     # set to true, when the leader task completes, all other tasks within
     # the task group will be gracefully shutdown. The shutdown process
     # starts by applying the shutdown_delay if configured. It then stops
-    # the the leader task first, followed by non-sidecar and non-poststop
+    # the leader task first, followed by non-sidecar and non-poststop
     # tasks, and finally sidecar tasks. Once this process completes,
     # post-stop tasks are triggered. See the lifecycle documentation for a
     # complete description of task lifecycle management.
