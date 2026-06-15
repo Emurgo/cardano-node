@@ -21,7 +21,9 @@ RUN cabal update \
     && cabal configure --with-compiler=ghc-9.6.5 \
     && echo "package cardano-crypto-praos" >>  cabal.project.local \
     && echo "  flags: -external-libsodium-vrf" >>  cabal.project.local \
-    && cabal build all \
+    && echo "package cardano-node" >>  cabal.project.local \
+    && echo "  ghc-options: -Wno-overlapping-patterns" >>  cabal.project.local \
+    && cabal build all --minimize-conflict-set \
     && mkdir -p /root/.local/bin/ \
     && cp -p dist-newstyle/build/x86_64-linux/ghc-9.6.5/cardano-node-*/x/cardano-node/build/cardano-node/cardano-node /root/.local/bin/
 
